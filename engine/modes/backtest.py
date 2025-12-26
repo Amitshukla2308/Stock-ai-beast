@@ -31,6 +31,14 @@ class BacktestMode(BaseMode):
     def start(self):
         """Run the Historical Backtest"""
         print(f"📊 Starting Backtest Mode: {self.start_date.date()} to {self.end_date.date()} (Session: {self.session_id})")
+        
+        # Register session metadata
+        self.journal.register_session(
+            symbol=self.symbol,
+            start_date=self.start_date.strftime('%Y-%m-%d'),
+            end_date=self.end_date.strftime('%Y-%m-%d')
+        )
+        
         self.running = True
         try:
             self._run_simulation()

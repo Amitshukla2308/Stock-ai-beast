@@ -34,6 +34,17 @@ class Journal:
             )
         """)
 
+        # 3. Session Metadata Table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS simulation_sessions (
+                session_id VARCHAR PRIMARY KEY,
+                symbol VARCHAR,
+                start_date VARCHAR,
+                end_date VARCHAR,
+                created_at TIMESTAMP
+            )
+        """)
+
         # 3. SCHEMA MIGRATION: Auto-add session_id if missing (for existing DBs)
         try:
             cols_trades = [r[0] for r in conn.execute("PRAGMA table_info('simulation_trades')").fetchall()]
@@ -82,3 +93,16 @@ class Journal:
             VALUES (?, ?, ?, ?)
         """, (self.session_id, timestamp, event_type, content))
         conn.close()
+
+    def register_session(self, symbol, start_date, end_date):
+        """Register session metadata at the start of a run"""
+        conn = get_connection()
+        try:
+            conn.execute("""
+                INSERT OR REPLACE INTO simulation_sessions (session_id, symbol, start_date, end_date, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (self.session_id, symbol, str(start_date), str(end_date), datetime.now()))
+        except Exception as e:
+            print(f"   ⚠️ Session Registration Error: {e}")
+        finally:
+            conn.close()
