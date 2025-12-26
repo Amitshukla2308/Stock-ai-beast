@@ -1,0 +1,43 @@
+# CONSTRAINT CONFIGURATION
+# These are the "Nit-grits" defined by the Human (You).
+# The System (Hot Path) enforces these significantly.
+
+market:
+  hours:
+    open: "09:15"
+    close: "15:30"
+    timezone: "Asia/Kolkata"
+  avoid_times:
+    opening_minutes: 5   # Avoid extreme volatility at open
+    closing_minutes: 30  # Avoid intraday squaring off volatility
+
+constraints:
+  # ----------------------------------------------------------------
+  # 1. HARD RULES (Non-negotiable)
+  # ----------------------------------------------------------------
+  theta:
+    max_days_to_expiry: 7       # Don't trade if expiry is very far (liquidity)
+    min_days_to_expiry: 0       # 0 means expiry day is allowed, but risky
+    max_theta_impact_pct: 0.05  # Max 5% of option value lost to theta per day
+
+  liquidity:
+    min_bid_ask_spread_pct: 0.02 # Max 2% spread allowed
+    min_oi: 100000              # Minimum Open Interest to participate
+
+  risk:
+    max_positions: 3
+    max_daily_loss_pct: 0.02    # Stop trading if account down 2%
+    max_portfolio_delta: 200    # Net delta exposure limit
+
+  # ----------------------------------------------------------------
+  # 2. SOFT CONSTRAINTS (Learnable / SLM Optimized)
+  # ----------------------------------------------------------------
+  greeks:
+    entry_delta_min: 0.40       # SLM can learn to adjust this
+    entry_delta_max: 0.75
+    max_gamma: 0.05             # High gamma = high risk
+    vega_kill_switch: 80        # IV Rank > 80% -> Exit
+
+  regime:
+    require_breakout_confirm: true
+    min_volatility_percentile: 20 # Don't trade in dead markets

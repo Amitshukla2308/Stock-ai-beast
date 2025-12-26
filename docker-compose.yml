@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  # 1. The Brain (LLM Service)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: beast_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: always
+
+  # 2. The Trader (Core Logic)
+  beast-core:
+    build: .
+    container_name: beast_core
+    depends_on:
+      - ollama
+    volumes:
+      - .:/app  # Hot reload for development
+      - beast_data:/app/data_store # Persistent data
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - FYERS_CLIENT_ID=${FYERS_CLIENT_ID}
+      - FYERS_SECRET_ID=${FYERS_SECRET_ID}
+      - VLLM_API_BASE=http://ollama:11434/v1
+    command: tail -f /dev/null # Keep alive for manual exec, or replace with python script
+
+volumes:
+  ollama_data:
+  beast_data:

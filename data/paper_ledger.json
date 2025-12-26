@@ -1,0 +1,22 @@
+{
+  "cash": 99550.0,
+  "positions": {
+    "NSE:TEST-EQ": 5
+  },
+  "trade_history": [
+    {
+      "timestamp": "2025-12-25T11:37:20.415454",
+      "symbol": "NSE:TEST-EQ",
+      "action": "BUY",
+      "quantity": 10,
+      "price": 100
+    },
+    {
+      "timestamp": "2025-12-25T11:37:20.427832",
+      "symbol": "NSE:TEST-EQ",
+      "action": "SELL",
+      "quantity": 5,
+      "price": 110
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+# Version Control
+.git
+.gitignore
+
+# Python Environments
+.venv
+venv
+env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Large Data (Mapped via Volumes instead)
+data/*.db
+data/*.duckdb
+logs/*
