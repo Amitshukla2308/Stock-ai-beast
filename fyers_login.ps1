@@ -1,6 +1,8 @@
 # Fyers stable Login Utility
 # Use this script to refresh your Fyers token natively on Windows or via WSL (powershell.exe).
 
+$ErrorActionPreference = "Stop"
+
 $envPath = Join-Path $PSScriptRoot ".env"
 if (Test-Path $envPath) {
     Get-Content $envPath | ForEach-Object {
@@ -17,7 +19,7 @@ $secretId = $ENV_FYERS_SECRET_ID
 $redirectUri = "https://trade.fyers.in/api-login/redirect-url"
 
 if (-not $clientId -or -not $secretId) {
-    Write-Host "❌ Error: FYERS_CLIENT_ID or FYERS_SECRET_ID not found in .env" -ForegroundColor Red
+    Write-Host "Error: FYERS_CLIENT_ID or FYERS_SECRET_ID not found in .env" -ForegroundColor Red
     $clientId = Read-Host "Please enter your Fyers Client ID"
     $secretId = Read-Host "Please enter your Fyers Secret ID"
 }
@@ -26,7 +28,7 @@ $escapedUri = [uri]::EscapeDataString($redirectUri)
 $authUrl = "https://api-t1.fyers.in/api/v3/generate-authcode?client_id=" + $clientId + "&redirect_uri=" + $escapedUri + "&response_type=code&state=None"
 
 Write-Host ""
-Write-Host "🔐 Fyers Authentication required" -ForegroundColor Cyan
+Write-Host "Fyers Authentication required" -ForegroundColor Cyan
 Write-Host "1. Open this URL in your browser:"
 Write-Host $authUrl -ForegroundColor Yellow
 Write-Host ""
@@ -44,7 +46,7 @@ else {
 }
 
 Write-Host ""
-Write-Host "🔄 Exchanging auth code for access token..." -ForegroundColor Cyan
+Write-Host "Exchanging auth code for access token..." -ForegroundColor Cyan
 
 # Calculate AppIdHash (SHA256 of ClientID:SecretID)
 $stringToHash = $clientId + ":" + $secretId
@@ -80,18 +82,18 @@ try {
         Set-Content -Path $tokenFile -Value $tokenData -Encoding utf8
         
         Write-Host ""
-        Write-Host "✅ Token successfully saved to fyers_token.json!" -ForegroundColor Green
+        Write-Host "Token successfully saved to fyers_token.json!" -ForegroundColor Green
         Write-Host "Bot is now ready." -ForegroundColor Green
     }
     else {
         Write-Host ""
-        Write-Host "❌ Authentication Failed: " + $response.message -ForegroundColor Red
-        Write-Host ($response | Out-String)
+        Write-Host "Authentication Failed: " -NoNewline -ForegroundColor Red
+        Write-Host $response.message
     }
 }
 catch {
     Write-Host ""
-    Write-Host "❌ Error during token exchange:" -ForegroundColor Red
+    Write-Host "Error during token exchange:" -ForegroundColor Red
     Write-Host $_.Exception.Message
 }
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceLine, ComposedChart, Scatter, ScatterChart, ZAxis } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceLine } from 'recharts';
 import { Activity, TrendingUp, BarChart3, Clock, AlertCircle, ChevronDown, ChevronUp, Cpu, LayoutDashboard, BrainCircuit, Table as TableIcon, Zap, Target, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -12,7 +12,7 @@ const App = () => {
     const [trades, setTrades] = useState([]);
     const [logs, setLogs] = useState([]);
     const [audits, setAudits] = useState([]);
-    const [marketData, setMarketData] = useState([]);
+
     const [positionStatus, setPositionStatus] = useState(null);
     const [selectedDate, setSelectedDate] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -45,19 +45,17 @@ const App = () => {
         if (!selectedSession) return;
         const fetchData = async () => {
             try {
-                const [equityRes, tradesRes, logsRes, auditsRes, marketDataRes] = await Promise.all([
+                const [equityRes, tradesRes, logsRes, auditsRes] = await Promise.all([
                     fetch(`/api/equity/${selectedSession}`),
                     fetch(`/api/trades/${selectedSession}`),
                     fetch(`/api/logs/${selectedSession}`),
-                    fetch(`/api/eod-audits/${selectedSession}`),
-                    fetch(`/api/market-data/${selectedSession}${selectedDate ? `?date=${selectedDate}` : ''}`)
+                    fetch(`/api/eod-audits/${selectedSession}`)
                 ]);
 
                 if (equityRes.ok) setEquity(await equityRes.json());
                 if (tradesRes.ok) setTrades(await tradesRes.json());
                 if (logsRes.ok) setLogs(await logsRes.json());
                 if (auditsRes.ok) setAudits(await auditsRes.json());
-                if (marketDataRes.ok) setMarketData(await marketDataRes.json());
 
             } catch (err) {
                 console.error("Failed to fetch session details", err);
@@ -72,10 +70,10 @@ const App = () => {
         };
 
         fetchData();
-        fetchPositionStatus();
+        // fetchPositionStatus(); // Disabled for now per user request
         const interval = setInterval(fetchData, 10000);
-        const posInterval = setInterval(fetchPositionStatus, 2000); // More frequent for live position
-        return () => { clearInterval(interval); clearInterval(posInterval); };
+        // const posInterval = setInterval(fetchPositionStatus, 2000); // More frequent for live position
+        return () => { clearInterval(interval); /* clearInterval(posInterval); */ };
     }, [selectedSession, selectedDate]);
 
     const sessionDays = useMemo(() => {
@@ -90,30 +88,7 @@ const App = () => {
         }
     }, [sessionDays]);
 
-    const processedMarketData = useMemo(() => {
-        if (!marketData.length) return [];
-        return marketData.map(candle => {
-            const candleTime = new Date(candle.timestamp).getTime();
-            // Match trades that happened within this 5-minute window [ts, ts + 5min]
-            const fiveMin = 5 * 60 * 1000;
-            const entries = trades.filter(t => {
-                const et = new Date(t.entry_time).getTime();
-                return et >= candleTime && et < candleTime + fiveMin;
-            });
-            const exits = trades.filter(t => {
-                const xt = new Date(t.exit_time).getTime();
-                return xt >= candleTime && xt < candleTime + fiveMin;
-            });
 
-            return {
-                ...candle,
-                time: new Date(candle.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                long_entry: entries.some(e => e.side === 'CALL') ? candle.low - 10 : null,
-                short_entry: entries.some(e => e.side === 'PUT') ? candle.high + 10 : null,
-                exit_marker: exits.length > 0 ? candle.close : null
-            };
-        });
-    }, [marketData, trades]);
 
     const stats = useMemo(() => {
         return sessions.find(s => s.session_id === selectedSession) || { total_pnl: 0, trade_count: 0, symbol: 'BEAST' };
@@ -255,7 +230,7 @@ const App = () => {
                                     <div className="text-right">
                                         <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest">Aggregate_Alpha</p>
                                         <p className={`text-xl font-black font-mono ${stats.total_pnl >= 0 ? 'text-tv-green' : 'text-tv-red'}`}>
-                                            {stats.total_pnl.toFixed(2)} pts
+                                            {(stats.total_pnl ?? 0).toFixed(2)} pts
                                         </p>
                                     </div>
                                 </div>
@@ -315,35 +290,7 @@ const App = () => {
                                 ))}
                             </div>
 
-                            {/* Market Price Landscape Chart */}
-                            <div className="bg-tv-bg border border-white/[0.05] rounded-xl shadow-2xl relative overflow-hidden h-[400px] w-full shrink-0 z-10">
-                                <div className="absolute top-6 left-8 z-20 pointer-events-none">
-                                    <h2 className="text-lg font-black font-mono tracking-tighter text-white">
-                                        PRICE_LANDSCAPE <span className="text-gray-500 text-xs ml-2 font-normal">DAY_{selectedDate}</span>
-                                    </h2>
-                                </div>
-                                <div className="absolute inset-0 pt-16 pb-6 pr-4 z-10">
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <ComposedChart data={processedMarketData}>
-                                            <CartesianGrid strokeDasharray="0 0" stroke="#2a2e39" vertical={false} horizontal={true} />
-                                            <XAxis dataKey="time" hide />
-                                            <YAxis
-                                                stroke="#2a2e39"
-                                                fontSize={10}
-                                                orientation="right"
-                                                tick={{ fill: '#808080' }}
-                                                domain={['auto', 'auto']}
-                                            />
-                                            <ZAxis type="number" range={[60, 60]} />
-                                            <Tooltip content={<TVTooltip />} />
-                                            <Line type="monotone" dataKey="close" stroke="#4b5263" strokeWidth={1} dot={false} animationDuration={1000} />
-                                            <Scatter dataKey="long_entry" shape="triangle" fill="#00ff9d" name="LONG_ENTRY" />
-                                            <Scatter dataKey="short_entry" shape="triangle" fill="#ff4b5c" name="SHORT_ENTRY" />
-                                            <Scatter dataKey="exit_marker" shape="circle" fill="#ffcc00" name="EXIT" />
-                                        </ComposedChart>
-                                    </ResponsiveContainer>
-                                </div>
-                            </div>
+
 
                             {/* Secondary Layer - Grid for Ledger & Matrix */}
                             <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 w-full">
@@ -394,13 +341,13 @@ const App = () => {
                                                         <td className="px-8 py-5 font-mono text-[12px] text-gray-300 font-bold">{trade.entry_price.toLocaleString(undefined, { minimumFractionDigits: 1 })}</td>
                                                         <td className="px-8 py-5 font-mono text-[12px] text-gray-300 font-bold">{trade.exit_price.toLocaleString(undefined, { minimumFractionDigits: 1 })}</td>
                                                         <td className={`px-8 py-5 font-mono font-black text-[13px] ${trade.pnl >= 0 ? 'text-tv-green' : 'text-tv-red'}`}>
-                                                            {trade.pnl > 0 ? '+' : ''}{trade.pnl.toFixed(1)}
+                                                            {trade.pnl > 0 ? '+' : ''}{(trade.pnl ?? 0).toFixed(1)}
                                                         </td>
                                                         <td className="px-4 py-5 font-mono text-[11px] text-tv-green font-bold">
-                                                            {trade.max_pnl > 0 ? '+' : ''}{trade.max_pnl.toFixed(1)}
+                                                            {trade.max_pnl > 0 ? '+' : ''}{(trade.max_pnl ?? 0).toFixed(1)}
                                                         </td>
                                                         <td className="px-4 py-5 font-mono text-[11px] text-accent-cyan font-bold">
-                                                            {trade.mean_open_pnl > 0 ? '+' : ''}{trade.mean_open_pnl.toFixed(1)}
+                                                            {trade.mean_open_pnl > 0 ? '+' : ''}{(trade.mean_open_pnl ?? 0).toFixed(1)}
                                                         </td>
                                                         <td className="px-8 py-5 text-[12px] text-gray-400 font-medium group-hover:text-white transition-colors">
                                                             {trade.reason}

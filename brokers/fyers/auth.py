@@ -14,33 +14,17 @@ CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 SECRET_ID = os.getenv("FYERS_SECRET_ID")
 REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/redirect-url")
 # Store token in the root directory relative to execution
-TOKEN_FILE = "fyers_token.json" 
-
-def get_next_6am_expiry():
-    """
-    Calculates the timestamp for 6 AM on the next day.
-    """
-    now = datetime.now()
-    next_day = now + timedelta(days=1)
-    expiry_time = next_day.replace(hour=6, minute=0, second=0, microsecond=0)
-    return expiry_time.timestamp()
-
-def save_token(access_token):
-    expiry = get_next_6am_expiry()
-    data = {
-        "access_token": access_token,
-        "expiry": expiry,
-        "expiry_readable": datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M:%S')
-    }
-    with open(TOKEN_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-    print(f"✅ Token saved! Valid until: {data['expiry_readable']}")
+# Determine absolute path to token file (project root)
+# Assumes auth.py is in brokers/fyers/
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+TOKEN_FILE = os.path.join(PROJECT_ROOT, "fyers_token.json")
 
 def load_token():
     if not os.path.exists(TOKEN_FILE):
         return None
     try:
-        with open(TOKEN_FILE, "r") as f:
+        # Use utf-8-sig to handle potential BOM from PowerShell
+        with open(TOKEN_FILE, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
         if datetime.now().timestamp() < data["expiry"]:
             return data["access_token"]

@@ -114,132 +114,73 @@ class EODAudit(BaseModel):
     total_pnl: float
     highest_win: float
     highest_loss: float
-    nugget: str
+    # Frontend expects these specifically
+    nugget_good: str
+    nugget_bad: str
+    bias: str
     feedback: Optional[str] = None
 
-class Candle(BaseModel):
-    timestamp: datetime
-    open: float
-    high: float
-    low: float
-    close: float
-
-SYMBOL_MAP = {
-    "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
-    "NIFTY": "NSE:NIFTY50-INDEX",
-    "FINNIFTY": "NSE:FINNIFTY-INDEX"
-}
-
-class PositionStatus(BaseModel):
-    has_position: bool = False
-    side: Optional[str] = None
-    entry_price: Optional[float] = None
-    current_price: Optional[float] = None
-    unrealized_pnl: Optional[float] = None
-    sl: Optional[float] = None
-    target: Optional[float] = None
-    entry_time: Optional[datetime] = None
-
-# Shared position state (will be updated by engine via Redis or direct import)
-current_position_state: Dict[str, Any] = {}
-
-@app.get("/position-status")
-async def get_position_status():
-    """Get current open position and unrealized PnL"""
-    # For now, return from shared state or empty
-    # In live mode, this would be updated by the engine
-    return PositionStatus(**current_position_state) if current_position_state else PositionStatus()
-
-@app.post("/position-status")
-async def update_position_status(status: PositionStatus):
-    """Update current position status (called by engine)"""
-    global current_position_state
-    current_position_state = status.dict()
-    return {"status": "updated"}
-
-@app.get("/")
-async def root():
-    return {"status": "online", "db_connected": os.path.exists(DB_PATH)}
-
-@app.get("/market-data/{session_id}", response_model=List[Candle])
-async def get_market_data(session_id: str, date: str = None):
-    conn = get_db_conn()
-    if not conn: return []
-    try:
-        # 1. Get session info
-        session_query = "SELECT symbol, start_date, end_date FROM simulation_sessions WHERE session_id = ?"
-        s_res = conn.execute(session_query, (session_id,)).fetchone()
-        if not s_res: return []
-        
-        symbol_raw, start_date, end_date = s_res
-        symbol = SYMBOL_MAP.get(symbol_raw, symbol_raw)
-        
-        # 2. Fetch candles for that period
-        if date:
-            query = """
-                SELECT timestamp, open, high, low, close 
-                FROM candles_5min 
-                WHERE symbol = ? 
-                  AND DATE(timestamp) = CAST(? AS DATE)
-                ORDER BY timestamp ASC
-            """
-            res = conn.execute(query, (symbol, date)).fetchall()
-        else:
-            query = """
-                SELECT timestamp, open, high, low, close 
-                FROM candles_5min 
-                WHERE symbol = ? 
-                  AND timestamp >= CAST(? AS DATE) AND timestamp <= CAST(? AS DATE) + INTERVAL '1 day'
-                ORDER BY timestamp ASC
-            """
-            res = conn.execute(query, (symbol, start_date, end_date)).fetchall()
-        
-        return [
-            Candle(timestamp=r[0], open=r[1], high=r[2], low=r[3], close=r[4])
-            for r in res
-        ]
-    except Exception as e:
-        logger.error(f"Error in get_market_data: {e}")
-        return []
-    finally:
-        conn.close()
 
 @app.get("/sessions", response_model=List[SessionInfo])
 async def get_sessions():
     conn = get_db_conn()
     if not conn: return []
     try:
+        # Aggregate stats from trades table
         query = """
             SELECT 
-                s.session_id, 
-                s.symbol,
-                s.start_date,
-                s.end_date,
-                MAX(t.timestamp) as last_update,
-                COUNT(t.session_id) as trade_count,
-                SUM(t.pnl) as total_pnl
+                s.session_id,
+                MAX(t.exit_time) as last_update,
+                COUNT(t.entry_time) as trade_count,
+                COALESCE(SUM(t.pnl), 0) as total_pnl,
+                30000 + (COALESCE(SUM(t.pnl), 0) * 27.5) as balance_rupees,
+                (COALESCE(SUM(t.pnl), 0) * 27.5) as pnl_rupees
             FROM simulation_sessions s
             LEFT JOIN simulation_trades t ON s.session_id = t.session_id
-            GROUP BY 1, 2, 3, 4, created_at
-            ORDER BY created_at DESC
+            GROUP BY s.session_id
+            ORDER BY last_update DESC
         """
-        res = conn.execute(query).fetchall()
+        rows = conn.execute(query).fetchall()
         return [
             SessionInfo(
-                session_id=str(r[0]), 
-                symbol=r[1] or "UNKNOWN",
-                start_date=r[2] or "N/A",
-                end_date=r[3] or "N/A",
-                last_update=r[4], 
-                trade_count=int(r[5]), 
-                total_pnl=float(r[6] or 0),
-                pnl_rupees=float(r[6] or 0) * PTS_TO_RUPEES,
-                balance_rupees=INITIAL_BALANCE + (float(r[6] or 0) * PTS_TO_RUPEES)
+                session_id=r[0],
+                last_update=r[1] or datetime.now(),
+                trade_count=r[2],
+                total_pnl=r[3],
+                balance_rupees=r[4],
+                pnl_rupees=r[5]
             )
-            for r in res
+            for r in rows
         ]
     except Exception as e:
-        logger.error(f"Error in get_sessions: {e}")
+        logger.error(f"Error fetching sessions: {e}")
+        return []
+    finally:
+        conn.close()
+
+@app.get("/equity/{session_id}")
+async def get_equity(session_id: str):
+    conn = get_db_conn()
+    if not conn: return []
+    try:
+        # We simulate an equity curve from the trades
+        # Or if we have an equity table, use it. 
+        # For now, let's build it from trades for robustness if equity table missing
+        query = "SELECT entry_time, pnl FROM simulation_trades WHERE session_id = ? ORDER BY entry_time ASC"
+        rows = conn.execute(query, (session_id,)).fetchall()
+        
+        curve = []
+        cum_pnl = 0.0
+        for r in rows:
+            cum_pnl += (r[1] or 0)
+            curve.append({
+                "time": r[0].strftime("%H:%M:%S") if r[0] else "",
+                "pnl": cum_pnl,
+                "trade_pnl": r[1]
+            })
+        return curve
+    except Exception as e:
+        logger.error(f"Error fetching equity: {e}")
         return []
     finally:
         conn.close()
@@ -249,24 +190,24 @@ async def get_trades(session_id: str):
     conn = get_db_conn()
     if not conn: return []
     try:
-        # Explicitly name columns to avoid ordering issues
         query = """
-            SELECT session_id, timestamp, side, entry_price, exit_price, pnl, reason, entry_time, exit_time, max_pnl, mean_open_pnl 
+            SELECT session_id, timestamp, side, entry_price, exit_price, pnl, reason, 
+                   entry_time, exit_time, max_pnl, mean_open_pnl
             FROM simulation_trades 
             WHERE session_id = ? 
-            ORDER BY exit_time ASC
+            ORDER BY entry_time DESC
         """
-        res = conn.execute(query, (session_id,)).fetchall()
+        rows = conn.execute(query, (session_id,)).fetchall()
         return [
             Trade(
-                session_id=str(r[0]), timestamp=r[1], side=str(r[2]), entry_price=float(r[3] or 0), 
-                exit_price=float(r[4] or 0), pnl=float(r[5] or 0), reason=str(r[6] or ""), 
-                entry_time=r[7], exit_time=r[8],
-                max_pnl=float(r[9] or 0), mean_open_pnl=float(r[10] or 0)
-            ) for r in res
+                session_id=r[0], timestamp=r[1], side=r[2], entry_price=r[3], 
+                exit_price=r[4], pnl=r[5], reason=r[6], entry_time=r[7], 
+                exit_time=r[8], max_pnl=r[9], mean_open_pnl=r[10]
+            )
+            for r in rows
         ]
     except Exception as e:
-        logger.error(f"Error in get_trades: {e}")
+        logger.error(f"Error fetching trades: {e}")
         return []
     finally:
         conn.close()
@@ -277,41 +218,22 @@ async def get_logs(session_id: str):
     if not conn: return []
     try:
         query = "SELECT session_id, timestamp, event_type, content FROM simulation_logs WHERE session_id = ? ORDER BY timestamp DESC"
-        res = conn.execute(query, (session_id,)).fetchall()
+        rows = conn.execute(query, (session_id,)).fetchall()
         return [
-            EventLog(session_id=str(r[0]), timestamp=r[1], event_type=str(r[2]), content=str(r[3] or ""))
-            for r in res
+            EventLog(session_id=r[0], timestamp=r[1], event_type=r[2], content=r[3])
+            for r in rows
         ]
     except Exception as e:
-        logger.error(f"Error in get_logs: {e}")
+        logger.error(f"Error fetching logs: {e}")
         return []
     finally:
         conn.close()
 
-@app.get("/equity/{session_id}")
-async def get_equity_curve(session_id: str):
-    conn = get_db_conn()
-    if not conn: return []
-    try:
-        query = "SELECT pnl, exit_time FROM simulation_trades WHERE session_id = ? ORDER BY exit_time ASC"
-        res = conn.execute(query, (session_id,)).fetchall()
-        
-        curve = []
-        cumulative = 0
-        for pnl, ts in res:
-            pnl_val = float(pnl or 0)
-            cumulative += pnl_val
-            curve.append({
-                "time": ts.isoformat() if hasattr(ts, 'isoformat') else str(ts), 
-                "pnl": round(cumulative, 2), 
-                "trade_pnl": pnl_val
-            })
-        return curve
-    except Exception as e:
-        logger.error(f"Error in get_equity_curve: {e}")
-        return []
-    finally:
-        conn.close()
+@app.get("/position-status")
+async def get_position_status():
+    # Only relevant for live trading, return empty for now or connect to database if needed
+    # Assuming valid live status is stored or relayed
+    return {"has_position": False}
 
 @app.get("/eod-audits/{session_id}", response_model=List[EODAudit])
 async def get_eod_audits(session_id: str):
@@ -319,7 +241,6 @@ async def get_eod_audits(session_id: str):
     if not conn: return []
     try:
         # 1. Fetch Daily Stats from trades
-        # DuckDB: date_trunc('day', exit_time) OR CAST(exit_time AS DATE)
         stats_query = """
             SELECT 
                 CAST(exit_time AS DATE) as trade_date,
@@ -335,7 +256,6 @@ async def get_eod_audits(session_id: str):
         stats_rows = conn.execute(stats_query, (session_id,)).fetchall()
         
         # 2. Fetch EOD Audits from logs
-        # We'll map them by date
         logs_query = """
             SELECT timestamp, content FROM simulation_logs 
             WHERE session_id = ? AND event_type = 'EOD_AUDIT'
@@ -344,39 +264,85 @@ async def get_eod_audits(session_id: str):
         logs_rows = conn.execute(logs_query, (session_id,)).fetchall()
         
         # Map logs by date string
-        # Content format might be "Backtest Audit | Day: 2024-01-01 ... Nugget: ..."
-        # OR it might be a JSON if brain returned dict.
-        nugget_map = {}
-        feedback_map = {}
+        # Content can be legacy string OR new JSON
+        audit_map = {}
         for ts, content in logs_rows:
             d_str = ts.strftime('%Y-%m-%d') if hasattr(ts, 'strftime') else str(ts)[:10]
-            nugget = ""
-            if "Nugget:" in content:
-                nugget = content.split("Nugget:")[-1].strip()
-            elif "Audit:" in content:
-                 # Fallback to something meaningful if nugget keyword missing
-                 nugget = content
-            nugget_map[d_str] = nugget
             
-            # Support for new JSON-based feedback
+            parsed_data = {
+                "nugget_good": "-",
+                "nugget_bad": "-",
+                "bias": "-",
+                "feedback": ""
+            }
+
             try:
+                # Try JSON first
                 data = json.loads(content)
-                feedback_map[d_str] = data.get('final_online_feedback', "")
+                
+                # 1. Nugget Good / What Worked
+                # Priority: nugget_good -> what_went_well -> nugget (fallback)
+                parsed_data["nugget_good"] = data.get('nugget_good', data.get('what_went_well', data.get('nugget', '-')))
+                
+                # 2. Nugget Bad / What Failed
+                parsed_data["nugget_bad"] = data.get('nugget_bad', data.get('what_went_wrong', '-'))
+                
+                # 3. Bias
+                # Priority: bias -> derived from bias_efficiency? -> default
+                raw_bias = data.get('bias', '-')
+                if raw_bias == '-' and 'bias_efficiency' in data:
+                    # Heuristic: If we don't have explicit bias, maybe we can't guess, 
+                    # but let's at least show the efficiency
+                    parsed_data["bias"] = f"EFF:{data['bias_efficiency']}"
+                else:
+                    parsed_data["bias"] = raw_bias
+
+                # 4. Feedback
+                # Priority: final_online_feedback -> audit_summary -> nugget
+                parsed_data["feedback"] = data.get('final_online_feedback', data.get('audit_summary', data.get('nugget', '')))
+                
             except:
-                if d_str not in feedback_map:
-                    feedback_map[d_str] = ""
+                # Fallback to Text Parsing
+                # Example: "PnL:0.0 | 1.0 | Nugget:In COMPLACENT VIX regime..."
+                
+                # Extract Nugget
+                if "Nugget:" in content:
+                    raw_nugget = content.split("Nugget:")[-1].strip()
+                    parsed_data["nugget_good"] = raw_nugget
+                elif "Audit:" in content:
+                    parsed_data["nugget_good"] = content
+                
+                # Extract Bias if present textually
+                content_lower = content.lower()
+                if "neutral bias" in content_lower:
+                    parsed_data["bias"] = "NEUTRAL"
+                elif "bullish bias" in content_lower:
+                     parsed_data["bias"] = "BULLISH"
+                elif "bearish bias" in content_lower:
+                     parsed_data["bias"] = "BEARISH"
+            
+            audit_map[d_str] = parsed_data
 
         audits = []
         for r in stats_rows:
             d_str = str(r[0]) # Date
+            audit_data = audit_map.get(d_str, {
+                "nugget_good": "No audit recorded.", 
+                "nugget_bad": "-", 
+                "bias": "-",
+                "feedback": ""
+            })
+            
             audits.append(EODAudit(
                 date=d_str,
                 trade_count=int(r[1]),
                 total_pnl=float(r[2] or 0),
                 highest_win=float(r[3] or 0),
                 highest_loss=float(r[4] or 0),
-                nugget=nugget_map.get(d_str, "No nugget recorded."),
-                feedback=feedback_map.get(d_str, "")
+                nugget_good=audit_data["nugget_good"],
+                nugget_bad=audit_data["nugget_bad"],
+                bias=audit_data["bias"],
+                feedback=audit_data["feedback"]
             ))
             
         return audits
