@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceLine } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceLine, ComposedChart, Scatter, ScatterChart, ZAxis } from 'recharts';
 import { Activity, TrendingUp, BarChart3, Clock, AlertCircle, ChevronDown, ChevronUp, Cpu, LayoutDashboard, BrainCircuit, Table as TableIcon, Zap, Target, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -12,6 +12,9 @@ const App = () => {
     const [trades, setTrades] = useState([]);
     const [logs, setLogs] = useState([]);
     const [audits, setAudits] = useState([]);
+    const [marketData, setMarketData] = useState([]);
+    const [positionStatus, setPositionStatus] = useState(null);
+    const [selectedDate, setSelectedDate] = useState(null);
     const [loading, setLoading] = useState(true);
 
     const [hoveredTradeTime, setHoveredTradeTime] = useState(null);
@@ -42,26 +45,75 @@ const App = () => {
         if (!selectedSession) return;
         const fetchData = async () => {
             try {
-                const [equityRes, tradesRes, logsRes, auditsRes] = await Promise.all([
+                const [equityRes, tradesRes, logsRes, auditsRes, marketDataRes] = await Promise.all([
                     fetch(`/api/equity/${selectedSession}`),
                     fetch(`/api/trades/${selectedSession}`),
                     fetch(`/api/logs/${selectedSession}`),
-                    fetch(`/api/eod-audits/${selectedSession}`)
+                    fetch(`/api/eod-audits/${selectedSession}`),
+                    fetch(`/api/market-data/${selectedSession}${selectedDate ? `?date=${selectedDate}` : ''}`)
                 ]);
 
                 if (equityRes.ok) setEquity(await equityRes.json());
                 if (tradesRes.ok) setTrades(await tradesRes.json());
                 if (logsRes.ok) setLogs(await logsRes.json());
                 if (auditsRes.ok) setAudits(await auditsRes.json());
+                if (marketDataRes.ok) setMarketData(await marketDataRes.json());
 
             } catch (err) {
                 console.error("Failed to fetch session details", err);
             }
         };
+
+        const fetchPositionStatus = async () => {
+            try {
+                const res = await fetch('/api/position-status');
+                if (res.ok) setPositionStatus(await res.json());
+            } catch (err) { /* ignore */ }
+        };
+
         fetchData();
+        fetchPositionStatus();
         const interval = setInterval(fetchData, 10000);
-        return () => clearInterval(interval);
-    }, [selectedSession]);
+        const posInterval = setInterval(fetchPositionStatus, 2000); // More frequent for live position
+        return () => { clearInterval(interval); clearInterval(posInterval); };
+    }, [selectedSession, selectedDate]);
+
+    const sessionDays = useMemo(() => {
+        if (!trades.length) return [];
+        const days = [...new Set(trades.map(t => new Date(t.entry_time).toISOString().split('T')[0]))];
+        return days.sort();
+    }, [trades]);
+
+    useEffect(() => {
+        if (sessionDays.length > 0 && !selectedDate) {
+            setSelectedDate(sessionDays[0]);
+        }
+    }, [sessionDays]);
+
+    const processedMarketData = useMemo(() => {
+        if (!marketData.length) return [];
+        return marketData.map(candle => {
+            const candleTime = new Date(candle.timestamp).getTime();
+            // Match trades that happened within this 5-minute window [ts, ts + 5min]
+            const fiveMin = 5 * 60 * 1000;
+            const entries = trades.filter(t => {
+                const et = new Date(t.entry_time).getTime();
+                return et >= candleTime && et < candleTime + fiveMin;
+            });
+            const exits = trades.filter(t => {
+                const xt = new Date(t.exit_time).getTime();
+                return xt >= candleTime && xt < candleTime + fiveMin;
+            });
+
+            return {
+                ...candle,
+                time: new Date(candle.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                long_entry: entries.some(e => e.side === 'CALL') ? candle.low - 10 : null,
+                short_entry: entries.some(e => e.side === 'PUT') ? candle.high + 10 : null,
+                exit_marker: exits.length > 0 ? candle.close : null
+            };
+        });
+    }, [marketData, trades]);
 
     const stats = useMemo(() => {
         return sessions.find(s => s.session_id === selectedSession) || { total_pnl: 0, trade_count: 0, symbol: 'BEAST' };
@@ -75,7 +127,7 @@ const App = () => {
 
     return (
         <div className="min-h-screen bg-oled text-gray-200 font-sans selection:bg-tv-green selection:text-black antialiased">
-            <div className="w-full mx-auto p-4 md:p-6 lg:p-8 space-y-6 flex flex-col items-stretch">
+            <div className="w-full mx-auto p-4 md:p-6 lg:p-8 space-y-6 flex flex-col items-stretch pb-32 overflow-y-auto">
 
                 {/* TradingView Style Top Bar - Fluid */}
                 <header className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 py-3 px-4 bg-tv-bg border border-white/[0.05] rounded-lg shadow-xl shrink-0">
@@ -128,13 +180,51 @@ const App = () => {
 
                 {/* Floating Quick Stats - Fluid Grid */}
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 shrink-0">
-                    <MetricSlot label="NET_PNL" value={stats.total_pnl.toFixed(1)} unit="pts" color={stats.total_pnl >= 0 ? 'tv-green' : 'tv-red'} />
+                    <MetricSlot label="NET_PNL" value={stats.total_pnl?.toFixed(1) || '0'} unit="pts" color={stats.total_pnl >= 0 ? 'tv-green' : 'tv-red'} />
                     <MetricSlot label="WIN_RATE" value={winRate} unit="%" color="tv-green" />
-                    <MetricSlot label="SESSIONS" value={stats.trade_count} unit="ops" color="white" />
-                    <MetricSlot label="LATENCY" value="0" unit="ms" color="accent-cyan" />
-                    <MetricSlot label="STREAK" value="0" unit="max" color="accent-purple" />
-                    <MetricSlot label="DRAWDOWN" value="0.0" unit="%" color="tv-red" />
+                    <MetricSlot label="TOTAL_TRADES" value={stats.trade_count || 0} unit="ops" color="white" />
+                    <MetricSlot label="BALANCE" value={stats.balance_rupees ? `₹${(stats.balance_rupees / 1000).toFixed(1)}k` : '₹30k'} unit="" color={stats.pnl_rupees >= 0 ? 'tv-green' : 'tv-red'} />
+                    <MetricSlot label="PNL_₹" value={stats.pnl_rupees ? `${stats.pnl_rupees >= 0 ? '+' : ''}₹${(stats.pnl_rupees / 1000).toFixed(1)}k` : '₹0'} unit="" color={stats.pnl_rupees >= 0 ? 'tv-green' : 'tv-red'} />
+                    <MetricSlot label="PTS/TRADE" value={stats.trade_count > 0 ? (stats.total_pnl / stats.trade_count).toFixed(1) : '0'} unit="avg" color="accent-cyan" />
                 </div>
+
+                {/* Live Position Status Panel */}
+                {positionStatus && positionStatus.has_position && (
+                    <div className="bg-tv-bg border-2 border-tv-green/30 rounded-xl p-4 shadow-xl animate-pulse-slow">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className={`w-3 h-3 rounded-full ${positionStatus.side === 'CALL' ? 'bg-tv-green' : 'bg-tv-red'} animate-pulse`} />
+                                <span className="text-lg font-black font-mono uppercase">
+                                    {positionStatus.side} POSITION
+                                </span>
+                            </div>
+                            <div className="text-right">
+                                <p className="text-[10px] text-gray-500 uppercase">Unrealized P&L</p>
+                                <p className={`text-2xl font-black font-mono ${positionStatus.unrealized_pnl >= 0 ? 'text-tv-green' : 'text-tv-red'}`}>
+                                    {positionStatus.unrealized_pnl >= 0 ? '+' : ''}{positionStatus.unrealized_pnl?.toFixed(1)} pts
+                                </p>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-4 gap-4 mt-4 text-[11px] font-mono">
+                            <div>
+                                <p className="text-gray-500">ENTRY</p>
+                                <p className="text-white font-bold">{positionStatus.entry_price?.toFixed(1)}</p>
+                            </div>
+                            <div>
+                                <p className="text-gray-500">CURRENT</p>
+                                <p className="text-white font-bold">{positionStatus.current_price?.toFixed(1)}</p>
+                            </div>
+                            <div>
+                                <p className="text-tv-red">STOP LOSS</p>
+                                <p className="text-tv-red font-bold">{positionStatus.sl?.toFixed(1)}</p>
+                            </div>
+                            <div>
+                                <p className="text-tv-green">TARGET</p>
+                                <p className="text-tv-green font-bold">{positionStatus.target?.toFixed(1)}</p>
+                            </div>
+                        </div>
+                    </div>
+                )}
 
                 <AnimatePresence mode="wait">
                     {activeTab === 'analytics' ? (
@@ -146,7 +236,7 @@ const App = () => {
                             className="flex flex-col gap-5 w-full"
                         >
                             {/* Main TV Chart Area - Full Width & Taller */}
-                            <div className="bg-tv-bg border border-white/[0.05] rounded-xl shadow-2xl relative overflow-hidden h-[720px] w-full shrink-0">
+                            <div className="bg-tv-bg border border-white/[0.05] rounded-xl shadow-2xl relative overflow-hidden h-[500px] w-full shrink-0 z-10">
                                 {/* Chart Overlay (Top Left Floating) */}
                                 <div className="absolute top-8 left-8 z-20 space-y-2 pointer-events-none">
                                     <div className="flex items-center gap-4">
@@ -209,6 +299,52 @@ const App = () => {
                                 </div>
                             </div>
 
+                            {/* Day Navigator */}
+                            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide no-scrollbar">
+                                {sessionDays.map(day => (
+                                    <button
+                                        key={day}
+                                        onClick={() => setSelectedDate(day)}
+                                        className={`px-4 py-2 rounded-lg font-mono text-[10px] font-black tracking-tighter whitespace-nowrap transition-all border ${selectedDate === day
+                                            ? 'bg-tv-green/20 border-tv-green text-tv-green shadow-[0_0_15px_rgba(34,171,148,0.2)]'
+                                            : 'bg-tv-bg border-white/[0.05] text-gray-500 hover:border-white/20'
+                                            }`}
+                                    >
+                                        {new Date(day).toLocaleDateString([], { month: 'short', day: 'numeric' }).toUpperCase()}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* Market Price Landscape Chart */}
+                            <div className="bg-tv-bg border border-white/[0.05] rounded-xl shadow-2xl relative overflow-hidden h-[400px] w-full shrink-0 z-10">
+                                <div className="absolute top-6 left-8 z-20 pointer-events-none">
+                                    <h2 className="text-lg font-black font-mono tracking-tighter text-white">
+                                        PRICE_LANDSCAPE <span className="text-gray-500 text-xs ml-2 font-normal">DAY_{selectedDate}</span>
+                                    </h2>
+                                </div>
+                                <div className="absolute inset-0 pt-16 pb-6 pr-4 z-10">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <ComposedChart data={processedMarketData}>
+                                            <CartesianGrid strokeDasharray="0 0" stroke="#2a2e39" vertical={false} horizontal={true} />
+                                            <XAxis dataKey="time" hide />
+                                            <YAxis
+                                                stroke="#2a2e39"
+                                                fontSize={10}
+                                                orientation="right"
+                                                tick={{ fill: '#808080' }}
+                                                domain={['auto', 'auto']}
+                                            />
+                                            <ZAxis type="number" range={[60, 60]} />
+                                            <Tooltip content={<TVTooltip />} />
+                                            <Line type="monotone" dataKey="close" stroke="#4b5263" strokeWidth={1} dot={false} animationDuration={1000} />
+                                            <Scatter dataKey="long_entry" shape="triangle" fill="#00ff9d" name="LONG_ENTRY" />
+                                            <Scatter dataKey="short_entry" shape="triangle" fill="#ff4b5c" name="SHORT_ENTRY" />
+                                            <Scatter dataKey="exit_marker" shape="circle" fill="#ffcc00" name="EXIT" />
+                                        </ComposedChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+
                             {/* Secondary Layer - Grid for Ledger & Matrix */}
                             <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 w-full">
                                 {/* Ledger View */}
@@ -230,6 +366,8 @@ const App = () => {
                                                     <th className="px-8 py-4">BASE_ENTRY</th>
                                                     <th className="px-8 py-4">BASE_EXIT</th>
                                                     <th className="px-8 py-4 text-tv-green">PNL_DELTA</th>
+                                                    <th className="px-4 py-4 text-tv-green">MAX_PNL</th>
+                                                    <th className="px-4 py-4 text-accent-cyan">MEAN_PNL</th>
                                                     <th className="px-8 py-4">LOGIC_GATE</th>
                                                 </tr>
                                             </thead>
@@ -242,7 +380,10 @@ const App = () => {
                                                         onMouseLeave={() => setHoveredTradeTime(null)}
                                                     >
                                                         <td className="px-8 py-5 font-mono text-[11px] text-gray-500">
-                                                            {new Date(trade.exit_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                                            {new Date(trade.exit_time).toLocaleString([], {
+                                                                year: 'numeric', month: '2-digit', day: '2-digit',
+                                                                hour: '2-digit', minute: '2-digit', second: '2-digit'
+                                                            })}
                                                         </td>
                                                         <td className="px-8 py-5 text-center">
                                                             <span className={`px-3 py-1 rounded-sm text-[9px] font-black tracking-widest uppercase border ${trade.side === 'CALL' ? 'border-tv-green/40 text-tv-green bg-tv-green/5' : 'border-tv-red/40 text-tv-red bg-tv-red/5'
@@ -254,6 +395,12 @@ const App = () => {
                                                         <td className="px-8 py-5 font-mono text-[12px] text-gray-300 font-bold">{trade.exit_price.toLocaleString(undefined, { minimumFractionDigits: 1 })}</td>
                                                         <td className={`px-8 py-5 font-mono font-black text-[13px] ${trade.pnl >= 0 ? 'text-tv-green' : 'text-tv-red'}`}>
                                                             {trade.pnl > 0 ? '+' : ''}{trade.pnl.toFixed(1)}
+                                                        </td>
+                                                        <td className="px-4 py-5 font-mono text-[11px] text-tv-green font-bold">
+                                                            {trade.max_pnl > 0 ? '+' : ''}{trade.max_pnl.toFixed(1)}
+                                                        </td>
+                                                        <td className="px-4 py-5 font-mono text-[11px] text-accent-cyan font-bold">
+                                                            {trade.mean_open_pnl > 0 ? '+' : ''}{trade.mean_open_pnl.toFixed(1)}
                                                         </td>
                                                         <td className="px-8 py-5 text-[12px] text-gray-400 font-medium group-hover:text-white transition-colors">
                                                             {trade.reason}
@@ -300,62 +447,42 @@ const App = () => {
                             exit={{ opacity: 0, y: -15 }}
                             className="space-y-6 w-full"
                         >
-                            {audits.map((audit, i) => (
-                                <div key={i} className="bg-tv-bg border border-white/[0.05] rounded-lg p-5 hover:border-tv-green/30 transition-all shadow-xl group w-full overflow-visible">
-                                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 border-b border-white/[0.05] pb-4">
-                                        <div className="flex items-center gap-10">
-                                            <div className="flex flex-col">
-                                                <span className="text-[8px] font-black text-gray-600 uppercase tracking-[0.3em] mb-1">AUDIT_CYCLE</span>
-                                                <h2 className="text-3xl font-black italic tracking-tighter text-white font-mono leading-none">
-                                                    {audit.date.split('-').slice(1).join('/')}
-                                                </h2>
-                                            </div>
-
-                                            <div className="flex gap-12 font-mono">
-                                                <div>
-                                                    <p className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-1">TOTAL_OPS</p>
-                                                    <p className="text-xl font-black">{audit.trade_count}</p>
-                                                </div>
-                                                <div>
-                                                    <p className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-1">NET_ALPHA</p>
-                                                    <p className={`text-xl font-black ${audit.total_pnl >= 0 ? 'text-tv-green' : 'text-tv-red'}`}>
-                                                        {audit.total_pnl >= 0 ? '+' : ''}{audit.total_pnl.toFixed(1)}
-                                                    </p>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        <div className="flex gap-10 text-right">
-                                            <div className="space-y-1">
-                                                <p className="text-[8px] font-black text-gray-600 tracking-widest uppercase">Peak Win</p>
-                                                <p className="text-xs font-black text-tv-green font-mono">+{audit.highest_win.toFixed(1)}</p>
-                                            </div>
-                                            <div className="space-y-1">
-                                                <p className="text-[8px] font-black text-gray-600 tracking-widest uppercase">Max Loss</p>
-                                                <p className="text-xs font-black text-tv-red font-mono">{audit.highest_loss.toFixed(1)}</p>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div className="mt-4 flex flex-col md:flex-row gap-4 items-start md:items-center">
-                                        <div className="flex items-center gap-2 shrink-0">
-                                            <BrainCircuit size={14} className="text-tv-green" />
-                                            <h4 className="text-[9px] font-black tracking-[0.4em] text-white uppercase italic">Neural_Result:</h4>
-                                        </div>
-
-                                        <div className="text-gray-300 text-[13px] leading-relaxed italic font-medium whitespace-pre-wrap break-words overflow-visible flex-1">
-                                            "{audit.nugget}"
-                                        </div>
-                                    </div>
-                                </div>
-                            ))}
-
                             {audits.length === 0 && (
                                 <div className="py-48 text-center flex flex-col items-center gap-6 opacity-30">
                                     <Activity size={64} className="animate-pulse" />
-                                    <p className="font-mono text-[12px] uppercase tracking-[0.6em] font-black text-tv-green">Historical Vault Empty</p>
+                                    <p className="font-mono text-[12px] uppercase tracking-[0.6em] font-black text-tv-green">No EOD Insights Available</p>
                                 </div>
                             )}
+
+
+                            {/* EOD Insights Summary Table */}
+                            {audits.length > 0 && (
+                                <div className="bg-tv-bg border border-white/[0.05] rounded-xl overflow-hidden shadow-xl mt-6">
+                                    <div className="px-6 py-4 border-b border-white/[0.05] bg-white/[0.01]">
+                                        <h3 className="text-[11px] font-black tracking-[0.4em] text-gray-400 uppercase">EOD_INSIGHTS_SUMMARY</h3>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left border-collapse">
+                                            <thead>
+                                                <tr className="text-[9px] font-black tracking-[0.2em] text-gray-500 uppercase bg-black/30">
+                                                    <th className="px-4 py-3">DATE</th>
+                                                    <th className="px-4 py-3">BIAS</th>
+                                                    <th className="px-4 py-3 text-right">PNL</th>
+                                                    <th className="px-4 py-3">FEEDBACK</th>
+                                                    <th className="px-4 py-3">✓ WHAT WORKED</th>
+                                                    <th className="px-4 py-3">✗ WHAT FAILED</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {audits.map((audit, i) => (
+                                                    <NuggetRow key={i} audit={audit} />
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
                         </motion.div>
                     )}
                 </AnimatePresence>
@@ -407,6 +534,59 @@ const TVTooltip = ({ active, payload }) => {
         );
     }
     return null;
+};
+
+// Expandable Nugget Row Component
+const NuggetRow = ({ audit }) => {
+    const [expanded, setExpanded] = React.useState(false);
+
+    // Parse nuggets from audit content
+    const parseNuggets = () => {
+        try {
+            // Look for nuggets in the audit data
+            return {
+                nugget_good: audit.nugget_good || audit.content?.nugget_good || "-",
+                nugget_bad: audit.nugget_bad || audit.content?.nugget_bad || "-"
+            };
+        } catch {
+            return { nugget_good: "-", nugget_bad: "-" };
+        }
+    };
+
+    const nuggets = parseNuggets();
+    const bias = audit.bias || audit.content?.bias || "-";
+
+    return (
+        <tr
+            className="border-b border-white/[0.02] hover:bg-white/[0.02] transition-all cursor-pointer"
+            onClick={() => setExpanded(!expanded)}
+        >
+            <td className="px-4 py-3 text-[11px] font-mono text-white">{audit.date}</td>
+            <td className="px-4 py-3">
+                <span className={`text-[10px] font-black px-2 py-1 rounded ${bias === 'BULLISH' ? 'bg-tv-green/20 text-tv-green' : 'bg-tv-red/20 text-tv-red'}`}>
+                    {bias}
+                </span>
+            </td>
+            <td className={`px-4 py-3 text-right text-[12px] font-black font-mono ${audit.total_pnl >= 0 ? 'text-tv-green' : 'text-tv-red'}`}>
+                {audit.total_pnl >= 0 ? '+' : ''}{audit.total_pnl?.toFixed(1)}
+            </td>
+            <td className="px-4 py-3 min-w-[250px]">
+                <div className="text-[10px] text-accent-cyan font-bold bg-accent-cyan/10 px-3 py-2 rounded-lg border border-accent-cyan/20">
+                    🎯 {audit.feedback || "Strategic calibration pending..."}
+                </div>
+            </td>
+            <td className="px-4 py-3">
+                <div className={`text-[10px] text-tv-green bg-tv-green/10 px-3 py-2 rounded-lg ${expanded ? '' : 'line-clamp-1'} transition-all`}>
+                    ✓ {nuggets.nugget_good}
+                </div>
+            </td>
+            <td className="px-4 py-3">
+                <div className={`text-[10px] text-tv-red bg-tv-red/10 px-3 py-2 rounded-lg ${expanded ? '' : 'line-clamp-1'} transition-all`}>
+                    ✗ {nuggets.nugget_bad}
+                </div>
+            </td>
+        </tr>
+    );
 };
 
 const parseContent = (content) => {

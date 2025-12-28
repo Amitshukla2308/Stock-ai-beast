@@ -12,7 +12,7 @@ load_dotenv()
 # Note: When moving to a package, verify if .env loading still works from root
 CLIENT_ID = os.getenv("FYERS_CLIENT_ID")
 SECRET_ID = os.getenv("FYERS_SECRET_ID")
-REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI")
+REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/redirect-url")
 # Store token in the root directory relative to execution
 TOKEN_FILE = "fyers_token.json" 
 

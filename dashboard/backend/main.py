@@ -77,11 +77,17 @@ def get_db_conn():
                 return None
         return None
 
+# Constants
+PTS_TO_RUPEES = 27.5  # 1 NIFTY pt = ₹27.5
+INITIAL_BALANCE = 30000  # Default starting balance
+
 class SessionInfo(BaseModel):
     session_id: str
     last_update: Optional[datetime] = None
     trade_count: int
     total_pnl: float
+    balance_rupees: Optional[float] = None  # Current balance in rupees
+    pnl_rupees: Optional[float] = None  # PnL in rupees
 
 class Trade(BaseModel):
     session_id: str
@@ -93,6 +99,8 @@ class Trade(BaseModel):
     reason: str
     entry_time: Optional[datetime] = None
     exit_time: Optional[datetime] = None
+    max_pnl: Optional[float] = 0.0
+    mean_open_pnl: Optional[float] = 0.0
 
 class EventLog(BaseModel):
     session_id: str
@@ -107,10 +115,94 @@ class EODAudit(BaseModel):
     highest_win: float
     highest_loss: float
     nugget: str
+    feedback: Optional[str] = None
+
+class Candle(BaseModel):
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+
+SYMBOL_MAP = {
+    "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "NIFTY": "NSE:NIFTY50-INDEX",
+    "FINNIFTY": "NSE:FINNIFTY-INDEX"
+}
+
+class PositionStatus(BaseModel):
+    has_position: bool = False
+    side: Optional[str] = None
+    entry_price: Optional[float] = None
+    current_price: Optional[float] = None
+    unrealized_pnl: Optional[float] = None
+    sl: Optional[float] = None
+    target: Optional[float] = None
+    entry_time: Optional[datetime] = None
+
+# Shared position state (will be updated by engine via Redis or direct import)
+current_position_state: Dict[str, Any] = {}
+
+@app.get("/position-status")
+async def get_position_status():
+    """Get current open position and unrealized PnL"""
+    # For now, return from shared state or empty
+    # In live mode, this would be updated by the engine
+    return PositionStatus(**current_position_state) if current_position_state else PositionStatus()
+
+@app.post("/position-status")
+async def update_position_status(status: PositionStatus):
+    """Update current position status (called by engine)"""
+    global current_position_state
+    current_position_state = status.dict()
+    return {"status": "updated"}
 
 @app.get("/")
 async def root():
     return {"status": "online", "db_connected": os.path.exists(DB_PATH)}
+
+@app.get("/market-data/{session_id}", response_model=List[Candle])
+async def get_market_data(session_id: str, date: str = None):
+    conn = get_db_conn()
+    if not conn: return []
+    try:
+        # 1. Get session info
+        session_query = "SELECT symbol, start_date, end_date FROM simulation_sessions WHERE session_id = ?"
+        s_res = conn.execute(session_query, (session_id,)).fetchone()
+        if not s_res: return []
+        
+        symbol_raw, start_date, end_date = s_res
+        symbol = SYMBOL_MAP.get(symbol_raw, symbol_raw)
+        
+        # 2. Fetch candles for that period
+        if date:
+            query = """
+                SELECT timestamp, open, high, low, close 
+                FROM candles_5min 
+                WHERE symbol = ? 
+                  AND DATE(timestamp) = CAST(? AS DATE)
+                ORDER BY timestamp ASC
+            """
+            res = conn.execute(query, (symbol, date)).fetchall()
+        else:
+            query = """
+                SELECT timestamp, open, high, low, close 
+                FROM candles_5min 
+                WHERE symbol = ? 
+                  AND timestamp >= CAST(? AS DATE) AND timestamp <= CAST(? AS DATE) + INTERVAL '1 day'
+                ORDER BY timestamp ASC
+            """
+            res = conn.execute(query, (symbol, start_date, end_date)).fetchall()
+        
+        return [
+            Candle(timestamp=r[0], open=r[1], high=r[2], low=r[3], close=r[4])
+            for r in res
+        ]
+    except Exception as e:
+        logger.error(f"Error in get_market_data: {e}")
+        return []
+    finally:
+        conn.close()
 
 @app.get("/sessions", response_model=List[SessionInfo])
 async def get_sessions():
@@ -119,29 +211,30 @@ async def get_sessions():
     try:
         query = """
             SELECT 
-                t.session_id, 
+                s.session_id, 
                 s.symbol,
                 s.start_date,
                 s.end_date,
                 MAX(t.timestamp) as last_update,
-                COUNT(*) as trade_count,
+                COUNT(t.session_id) as trade_count,
                 SUM(t.pnl) as total_pnl
-            FROM simulation_trades t
-            LEFT JOIN simulation_sessions s ON t.session_id = s.session_id
-            WHERE t.session_id IS NOT NULL
-            GROUP BY 1, 2, 3, 4
-            ORDER BY last_update DESC
+            FROM simulation_sessions s
+            LEFT JOIN simulation_trades t ON s.session_id = t.session_id
+            GROUP BY 1, 2, 3, 4, created_at
+            ORDER BY created_at DESC
         """
         res = conn.execute(query).fetchall()
         return [
             SessionInfo(
                 session_id=str(r[0]), 
-                symbol=r[1],
-                start_date=r[2],
-                end_date=r[3],
+                symbol=r[1] or "UNKNOWN",
+                start_date=r[2] or "N/A",
+                end_date=r[3] or "N/A",
                 last_update=r[4], 
                 trade_count=int(r[5]), 
-                total_pnl=float(r[6] or 0)
+                total_pnl=float(r[6] or 0),
+                pnl_rupees=float(r[6] or 0) * PTS_TO_RUPEES,
+                balance_rupees=INITIAL_BALANCE + (float(r[6] or 0) * PTS_TO_RUPEES)
             )
             for r in res
         ]
@@ -158,7 +251,7 @@ async def get_trades(session_id: str):
     try:
         # Explicitly name columns to avoid ordering issues
         query = """
-            SELECT session_id, timestamp, side, entry_price, exit_price, pnl, reason, entry_time, exit_time 
+            SELECT session_id, timestamp, side, entry_price, exit_price, pnl, reason, entry_time, exit_time, max_pnl, mean_open_pnl 
             FROM simulation_trades 
             WHERE session_id = ? 
             ORDER BY exit_time ASC
@@ -168,7 +261,8 @@ async def get_trades(session_id: str):
             Trade(
                 session_id=str(r[0]), timestamp=r[1], side=str(r[2]), entry_price=float(r[3] or 0), 
                 exit_price=float(r[4] or 0), pnl=float(r[5] or 0), reason=str(r[6] or ""), 
-                entry_time=r[7], exit_time=r[8]
+                entry_time=r[7], exit_time=r[8],
+                max_pnl=float(r[9] or 0), mean_open_pnl=float(r[10] or 0)
             ) for r in res
         ]
     except Exception as e:
@@ -253,6 +347,7 @@ async def get_eod_audits(session_id: str):
         # Content format might be "Backtest Audit | Day: 2024-01-01 ... Nugget: ..."
         # OR it might be a JSON if brain returned dict.
         nugget_map = {}
+        feedback_map = {}
         for ts, content in logs_rows:
             d_str = ts.strftime('%Y-%m-%d') if hasattr(ts, 'strftime') else str(ts)[:10]
             nugget = ""
@@ -262,6 +357,14 @@ async def get_eod_audits(session_id: str):
                  # Fallback to something meaningful if nugget keyword missing
                  nugget = content
             nugget_map[d_str] = nugget
+            
+            # Support for new JSON-based feedback
+            try:
+                data = json.loads(content)
+                feedback_map[d_str] = data.get('final_online_feedback', "")
+            except:
+                if d_str not in feedback_map:
+                    feedback_map[d_str] = ""
 
         audits = []
         for r in stats_rows:
@@ -272,7 +375,8 @@ async def get_eod_audits(session_id: str):
                 total_pnl=float(r[2] or 0),
                 highest_win=float(r[3] or 0),
                 highest_loss=float(r[4] or 0),
-                nugget=nugget_map.get(d_str, "No nugget recorded.")
+                nugget=nugget_map.get(d_str, "No nugget recorded."),
+                feedback=feedback_map.get(d_str, "")
             ))
             
         return audits

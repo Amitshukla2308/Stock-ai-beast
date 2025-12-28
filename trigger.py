@@ -18,14 +18,18 @@ def kill_existing():
         pass
     time.sleep(1)
 
-def trigger(mode, days, debug, symbol="BANKNIFTY"):
+def trigger(mode, days, debug, symbol="BANKNIFTY", start_date=None, end_date=None, balance=30000):
     kill_existing()
     print(f"🔥 Triggering Mode: {mode.upper()} for {symbol}")
 
     if mode == "backtest":
-        print(f"   📜 Running Historical Backtest for {days} days...")
-        # Run blocking using the new gateway
-        run_command(f"docker exec beast_engine python -m engine.gateway backtest --days {days} --symbol {symbol}")
+        print(f"   📜 Running Historical Backtest (Balance: ₹{balance:,})...")
+        cmd = f"docker exec beast_engine python -m engine.gateway backtest --symbol {symbol} --balance {balance}"
+        if start_date and end_date:
+            cmd += f" --start-date {start_date} --end-date {end_date}"
+        else:
+            cmd += f" --days {days}"
+        run_command(cmd)
 
     elif mode == "mock":
         print(f"   🎭 Starting MOCK Session (Replaying last {days} days for {symbol})...")
@@ -70,7 +74,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stock AI Beast Control Plane")
     parser.add_argument("mode", choices=["backtest", "mock", "live"], help="Execution Mode")
     parser.add_argument("--days", type=int, default=5, help="Days for backtest/mock")
+    parser.add_argument("--start-date", type=str, help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD)")
     parser.add_argument("--symbol", type=str, default="BANKNIFTY", help="Ticker symbol")
+    parser.add_argument("--balance", type=int, default=30000, help="Starting balance in rupees (default: 30000)")
     parser.add_argument("--debug", action="store_true", help="Enable fast schedule for testing")
     
     if len(sys.argv) == 1:
@@ -78,4 +85,4 @@ if __name__ == "__main__":
         sys.exit(1)
         
     args = parser.parse_args()
-    trigger(args.mode, args.days, args.debug, args.symbol)
+    trigger(args.mode, args.days, args.debug, args.symbol, args.start_date, args.end_date, args.balance)

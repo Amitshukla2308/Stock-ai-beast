@@ -1,0 +1,12 @@
+{
+  "instrument": "NIFTY (from 5min candles)",
+  "avg1": 135.3,
+  "avg2": 204.2,
+  "avg3": 321.9,
+  "median_daily_range": 180.6,
+  "mean_daily_range": 471.7,
+  "max_directional_ever": 33618.6,
+  "data_source": "nifty_5min_historical_analysis",
+  "sample_size": 989,
+  "analysis_date": "2025-12-28T05:51:44.236561"
+}

@@ -118,8 +118,18 @@ class MarketSimulator:
         # Fetch Real Context
         context = fetch_context_data(current_time)
         
-        # Calculate Day PnL from permanent ledger
-        day_pnl = sum([t.get('pnl', 0) for t in self.hot_path.trade_ledger if t.get('pnl') is not None])
+        # Calculate Day PnL from permanent ledger (filter by today's date)
+        today_str = current_time.strftime('%Y-%m-%d') if hasattr(current_time, 'strftime') else str(current_time)[:10]
+        day_pnl = 0.0
+        for t in self.hot_path.trade_ledger:
+            exit_time = t.get('exit_time')
+            if exit_time and t.get('pnl') is not None:
+                if hasattr(exit_time, 'strftime'):
+                    exit_date = exit_time.strftime('%Y-%m-%d')
+                else:
+                    exit_date = str(exit_time)[:10]
+                if exit_date == today_str:
+                    day_pnl += t.get('pnl', 0)
         
         instructions = self.brain.get_tactical_update(
             tick, 

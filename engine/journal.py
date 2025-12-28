@@ -20,7 +20,9 @@ class Journal:
                 pnl FLOAT,
                 reason VARCHAR,
                 entry_time TIMESTAMP,
-                exit_time TIMESTAMP
+                exit_time TIMESTAMP,
+                max_pnl FLOAT,
+                mean_open_pnl FLOAT
             )
         """)
         
@@ -47,12 +49,20 @@ class Journal:
 
         # 3. SCHEMA MIGRATION: Auto-add session_id if missing (for existing DBs)
         try:
-            cols_trades = [r[0] for r in conn.execute("PRAGMA table_info('simulation_trades')").fetchall()]
+            cols_trades = [r[1] for r in conn.execute("PRAGMA table_info('simulation_trades')").fetchall()]
             if 'session_id' not in cols_trades:
                 print("   🛠️ Migrating 'simulation_trades': Adding session_id column...")
                 conn.execute("ALTER TABLE simulation_trades ADD COLUMN session_id VARCHAR")
             
-            cols_logs = [r[0] for r in conn.execute("PRAGMA table_info('simulation_logs')").fetchall()]
+            if 'max_pnl' not in cols_trades:
+                print("   🛠️ Migrating 'simulation_trades': Adding max_pnl column...")
+                conn.execute("ALTER TABLE simulation_trades ADD COLUMN max_pnl FLOAT")
+            
+            if 'mean_open_pnl' not in cols_trades:
+                print("   🛠️ Migrating 'simulation_trades': Adding mean_open_pnl column...")
+                conn.execute("ALTER TABLE simulation_trades ADD COLUMN mean_open_pnl FLOAT")
+
+            cols_logs = [r[1] for r in conn.execute("PRAGMA table_info('simulation_logs')").fetchall()]
             if 'session_id' not in cols_logs:
                 print("   🛠️ Migrating 'simulation_logs': Adding session_id column...")
                 conn.execute("ALTER TABLE simulation_logs ADD COLUMN session_id VARCHAR")
@@ -66,8 +76,8 @@ class Journal:
         conn = get_connection()
         conn.execute("""
             INSERT INTO simulation_trades (
-                session_id, timestamp, side, entry_price, exit_price, pnl, reason, entry_time, exit_time
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                session_id, timestamp, side, entry_price, exit_price, pnl, reason, entry_time, exit_time, max_pnl, mean_open_pnl
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             self.session_id,
             datetime.now(), # Log time
@@ -77,7 +87,9 @@ class Journal:
             trade['pnl'],
             trade['reason'],
             trade['entry_time'],
-            trade['exit_time']
+            trade['exit_time'],
+            trade.get('max_pnl', 0),
+            trade.get('mean_open_pnl', 0)
         ))
         conn.close()
 
