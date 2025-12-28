@@ -161,6 +161,41 @@ class HotPathExecutor:
             # print(f"      🚫 Filtered: {action} (Conf {final_confidence:.2f} < {threshold})")
             instructions['action'] = "HOLD"
         
+        # 3.5 ENTRY LOCATION FILTER: Skip SUBOPTIMAL entries with low confidence
+        entry_location = instructions.get('entry_location', 'GOOD')
+        if entry_location == 'SUBOPTIMAL' and final_confidence < 0.6 and action in ["BUY_CALL", "BUY_PUT"]:
+            print(f"      ⚠️ SUBOPTIMAL entry + low confidence ({final_confidence:.2f}) → SKIP")
+            instructions['action'] = "HOLD"
+        
+        # 3.6 LEVEL CONFIRMATION FILTER: Respect S/P/R with 20pt confirmation
+        # Don't enter against a level without confirmation of break
+        entry = instructions.get('entry_price') or instructions.get('entry', 0)
+        support = instructions.get('support', 0)
+        pivot = instructions.get('pivot', 0)
+        resistance = instructions.get('resistance', 0)
+        
+        if entry and action in ["BUY_CALL", "BUY_PUT"] and instructions['action'] != "HOLD":
+            # For PUT: Don't enter if within 20pts ABOVE support (risk of bounce)
+            if action == "BUY_PUT" and support:
+                dist_above_support = entry - support
+                if 0 < dist_above_support <= 20:
+                    print(f"      ⚠️ PUT entry {entry:.1f} within 20pts above Support {support:.1f} → SKIP (wait for break)")
+                    instructions['action'] = "HOLD"
+            
+            # For CALL: Don't enter if within 20pts BELOW resistance (risk of rejection)
+            if action == "BUY_CALL" and resistance:
+                dist_below_resistance = resistance - entry
+                if 0 < dist_below_resistance <= 20:
+                    print(f"      ⚠️ CALL entry {entry:.1f} within 20pts below Resistance {resistance:.1f} → SKIP (wait for break)")
+                    instructions['action'] = "HOLD"
+            
+            # For both: Don't enter within 20pts of pivot (reversal zone)
+            if pivot:
+                dist_to_pivot = abs(entry - pivot)
+                if dist_to_pivot <= 20:
+                    print(f"      ⚠️ Entry {entry:.1f} within 20pts of Pivot {pivot:.1f} → SKIP (reversal zone)")
+                    instructions['action'] = "HOLD"
+        
         # 4. USE LLM's SL/TARGET VALUES (v5.1 - Trust prompt logic)
         # The LLM prompt now calculates proper 2x R:R targets
         # We apply minimum floors AND create fallbacks if LLM didn't provide values
@@ -212,6 +247,27 @@ class HotPathExecutor:
                         instructions['target'] = round(entry + 30, 1)
                     else:
                         instructions['target'] = round(entry - 30, 1)
+            
+            # 4.1 TARGET LEVEL ADJUSTMENT: Cap target to respect S/P/R levels
+            # If a level blocks target path, cap to 15pts before that level
+            current_target = instructions.get('target', llm_target)
+            if current_target:
+                if action == "BUY_PUT":
+                    # For PUT: target is below entry - check if support blocks it
+                    if support and support > current_target and support < entry:
+                        # Support is between entry and target - cap to 15pts before support
+                        new_target = support - 15
+                        if new_target != current_target:
+                            print(f"      📉 Target capped: Support {support:.1f} in way → TGT {current_target:.1f} → {new_target:.1f}")
+                            instructions['target'] = new_target
+                else:  # BUY_CALL
+                    # For CALL: target is above entry - check if resistance blocks it
+                    if resistance and resistance < current_target and resistance > entry:
+                        # Resistance is between entry and target - cap to 15pts before resistance
+                        new_target = resistance - 15
+                        if new_target != current_target:
+                            print(f"      📈 Target capped: Resistance {resistance:.1f} in way → TGT {current_target:.1f} → {new_target:.1f}")
+                            instructions['target'] = new_target
 
         # === ADAPTIVE MOMENTUM STRATEGY ===
         if action in ["BUY_CALL", "BUY_PUT"] and not self.open_position:
@@ -251,7 +307,10 @@ class HotPathExecutor:
                     self.scalping_mode = True
                     
                     # Override to scalping parameters
-                    entry = instructions.get('entry_price')
+                    entry = instructions.get('entry') or instructions.get('entry_price')
+                    if not entry:
+                        print("      ⚠️ SCALPING: No entry price, skipping")
+                        return
                     if action == "BUY_CALL":
                         instructions['target'] = round(entry + 30, 1)
                         instructions['sl'] = round(entry - 15, 1)
@@ -360,28 +419,52 @@ class HotPathExecutor:
         
         if action == Action.BUY_CALL.value:
             # CALL: Expecting price to go UP
+            # Favorable entry: price moved UP from entry (in our direction)
             if entry_level == 0:
                 # Immediate entry at open
                 self._enter_trade(candle_open, timestamp, 'CALL')
             elif candle_high >= entry_level:
-                # Entry level was reached this candle
+                # Price touched or exceeded entry level
                 if candle_open >= entry_level:
-                    # Gap up beyond entry - fill at open (slippage)
-                    self._enter_trade(candle_open, timestamp, 'CALL')
+                    # Price at or above entry - check if favorable (within 10pts UP)
+                    favorable_move = candle_open - entry_level
+                    if favorable_move >= 0 and favorable_move <= 10:
+                        # Enter at open (price moved in our favor up to 10pts)
+                        self._enter_trade(candle_open, timestamp, 'CALL')
+                    elif favorable_move > 10:
+                        # Price moved too far up, skip - might be exhausted
+                        print(f"      ⚠️ SKIP: Price moved {favorable_move:.0f}pts up (too far, might reverse)")
+                        self.active_instructions = {}
+                        return
                 else:
                     # Price traversed UP through entry - fill at exact entry
                     self._enter_trade(entry_level, timestamp, 'CALL')
                     
         elif action == Action.BUY_PUT.value:
             # PUT: Expecting price to go DOWN
+            # Favorable entry: price is BELOW entry_level (already moved in our direction)
             if entry_level == 0:
                 # Immediate entry at open
                 self._enter_trade(candle_open, timestamp, 'PUT')
             elif candle_low <= entry_level:
-                # Entry level was reached this candle
+                # Price touched or went below entry level
                 if candle_open <= entry_level:
-                    # Gap down beyond entry - fill at open (slippage)
-                    self._enter_trade(candle_open, timestamp, 'PUT')
+                    # Price already at or below entry - check if favorable (within 10pts)
+                    favorable_move = entry_level - candle_open
+                    if favorable_move >= 0 and favorable_move <= 10:
+                        # Enter at open (price moved in our favor up to 10pts)
+                        # SL will be calculated from actual entry price
+                        self._enter_trade(candle_open, timestamp, 'PUT')
+                    elif favorable_move > 10:
+                        # Price moved too far down, skip - might be exhausted
+                        print(f"      ⚠️ SKIP: Price moved {favorable_move:.0f}pts in our favor (too far, might reverse)")
+                        self.active_instructions = {}
+                        return
+                    else:
+                        # Price gapped UP (unfavorable), skip
+                        print(f"      ⚠️ SKIP: Price gapped up {-favorable_move:.0f}pts (wrong direction)")
+                        self.active_instructions = {}
+                        return
                 else:
                     # Price traversed DOWN through entry - fill at exact entry
                     self._enter_trade(entry_level, timestamp, 'PUT')
@@ -455,11 +538,50 @@ class HotPathExecutor:
         if unrealized_pnl > pos['max_pnl']:
             pos['max_pnl'] = unrealized_pnl
         
+        # === ADVANCED TRAILING SYSTEM ===
+        entry_price = pos['entry_price']
+        original_target_dist = pos.get('original_target_dist')
+        
+        # Store original target distance on first run
+        if original_target_dist is None and target:
+            if pos['side'] == 'CALL':
+                original_target_dist = target - entry_price
+            else:
+                original_target_dist = entry_price - target
+            pos['original_target_dist'] = original_target_dist
+        
+        # Calculate progress towards target (0-100%)
+        target_progress = 0
+        if original_target_dist and original_target_dist > 0:
+            target_progress = (unrealized_pnl / original_target_dist) * 100
+        
+        # === SIMPLE SL ADJUSTMENT: At 60% of target, move SL to lock 50% ===
+        # No continuous trailing, just one adjustment at the 60% milestone
+        if target_progress >= 60 and not pos.get('sl_adjusted'):
+            # Calculate 50% of target distance
+            locked_profit = int(original_target_dist * 0.5)
+            
+            if pos['side'] == 'CALL':
+                new_sl = entry_price + locked_profit
+                if sl is None or new_sl > sl:
+                    pos['sl'] = new_sl
+                    pos['sl_adjusted'] = True
+                    sl = new_sl
+                    print(f"      🔒 60% REACHED → SL to +{locked_profit}pts (SL→{new_sl:.1f})")
+            else:  # PUT
+                new_sl = entry_price - locked_profit
+                if sl is None or new_sl < sl:
+                    pos['sl'] = new_sl
+                    pos['sl_adjusted'] = True
+                    sl = new_sl
+                    print(f"      🔒 60% REACHED → SL to +{locked_profit}pts (SL→{new_sl:.1f})")
+        
         # Log position status every candle
         pnl_color = "🟢" if unrealized_pnl >= 0 else "🔴"
         sl_str = f"{sl:.1f}" if sl else "N/A"
         tgt_str = f"{target:.1f}" if target else "N/A"
-        print(f"      {pnl_color} {pos['side']} PnL: {unrealized_pnl:+.1f} | Price: {current_price:.1f} | SL: {sl_str} | TGT: {tgt_str}")
+        prog_str = f" [{target_progress:.0f}% to TGT]" if target_progress > 0 else ""
+        print(f"      {pnl_color} {pos['side']} PnL: {unrealized_pnl:+.1f}{prog_str} | Price: {current_price:.1f} | SL: {sl_str} | TGT: {tgt_str}")
         
         exit_price = None
         exit_reason = None

@@ -163,7 +163,7 @@ full_logs.txt
 brain_output_log.txt
 gateway_prefill_verification.txt
 sim_output*.txt
-brain/
+# brain/
 logs/
 *.logs
 fyersApi.log

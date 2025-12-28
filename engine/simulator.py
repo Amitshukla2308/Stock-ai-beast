@@ -35,10 +35,12 @@ class MarketSimulator:
         """
         return self.conn.execute(query).fetchdf()
 
-    def run(self):
         """
         Main Event Loop
         """
+        # Register session for Dashboard visibility
+        self.journal.register_session(self.symbol, self.start_date, self.end_date)
+        
         current_date = self.start_date
         
         while current_date <= self.end_date:

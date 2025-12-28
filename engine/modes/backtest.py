@@ -1,7 +1,7 @@
 import pandas as pd
 from datetime import datetime, timedelta, time
 import pytz
-from data.database import get_connection, fetch_context_data, get_fyers_symbol
+from data.database import get_connection, fetch_context_data, get_fyers_symbol, save_experience
 from brain.llm_client import LLMClient
 from hot_path.executor import HotPathExecutor
 from engine.journal import Journal
@@ -394,6 +394,16 @@ class BacktestMode(BaseMode):
             mb_context['gap_info'] = gap_info
 
         brief = self.brain.get_morning_brief(mb_context, current_tick=first_tick, symbol=self.symbol)
+        
+        if not brief:
+             print("      ⚠️ Brain Malfunction (Morning). Using Default Passive Plan.")
+             brief = {
+                 'market_personality': 'UNKNOWN',
+                 'vix_regime': 'NORMAL',
+                 'primary_bias': 'NEUTRAL',
+                 'morning_logic': 'Fallback: Defensive Mode due to Brain Failure'
+             }
+
         logic = brief.get('morning_logic', brief.get('market_logic', "No Logic Provided"))
         print(f"      📝 Plan: {logic}")
         self.morning_brief = brief 
@@ -402,49 +412,65 @@ class BacktestMode(BaseMode):
     def trigger_tactical_update(self, tick):
         if isinstance(tick, pd.Series): tick = tick.to_dict()
         
-        # Fetch Real Context
-        context = fetch_context_data(tick['timestamp'], symbol=self.symbol)
-        
-        # Calculate Real PnL (Position)
-        current_pnl = 0
-        if self.hot_path.open_position:
-            pos = self.hot_path.open_position
-            if pos['side'] == 'CALL':
-                current_pnl = tick['close'] - pos['entry_price']
-            else:
-                current_pnl = pos['entry_price'] - tick['close']
-        
-        # Calculate Day PnL (Sum of closed trades for TODAY from permanent ledger)
-        today_str = tick['timestamp'].strftime('%Y-%m-%d')
-        day_pnl = 0.0
-        for t in self.hot_path.trade_ledger:
-            exit_time = t.get('exit_time')
-            if exit_time and t.get('pnl') is not None:
-                # Handle both datetime objects and strings
-                if hasattr(exit_time, 'strftime'):
-                    exit_date = exit_time.strftime('%Y-%m-%d')
-                else:
-                    exit_date = str(exit_time)[:10]
-                if exit_date == today_str:
-                    day_pnl += t.get('pnl', 0)
-        
-        instructions = self.brain.get_tactical_update(
-            tick, 
-            context=context,
-            plan=self.morning_brief,
-            current_pnl=current_pnl, 
-            open_position=self.hot_path.open_position,
-            day_pnl=day_pnl,
-            symbol=self.symbol
-        )
-        if instructions:
-            # Inject pre-computed logic for Hot Path
-            instructions['atr'] = context.get('atr_14')
-            instructions['vix'] = context.get('vix')
-            instructions['morning_bias'] = self.morning_brief.get('primary_bias') if self.morning_brief else 'NEUTRAL'
+        try:
+            # Fetch Real Context
+            context = fetch_context_data(tick['timestamp'], symbol=self.symbol)
             
-            self.hot_path.update_instructions(instructions)
-            self.journal.log_event(tick['timestamp'], "TACTICAL", instructions)
+            # Calculate Real PnL (Position)
+            current_pnl = 0
+            if self.hot_path.open_position:
+                pos = self.hot_path.open_position
+                if pos['side'] == 'CALL':
+                    current_pnl = tick['close'] - pos['entry_price']
+                else:
+                    current_pnl = pos['entry_price'] - tick['close']
+            
+            # Calculate Day PnL (Sum of closed trades for TODAY from permanent ledger)
+            today_str = tick['timestamp'].strftime('%Y-%m-%d')
+            day_pnl = 0.0
+            for t in self.hot_path.trade_ledger:
+                exit_time = t.get('exit_time')
+                if exit_time and t.get('pnl') is not None:
+                    # Handle both datetime objects and strings
+                    if hasattr(exit_time, 'strftime'):
+                        exit_date = exit_time.strftime('%Y-%m-%d')
+                    else:
+                        exit_date = str(exit_time)[:10]
+                    if exit_date == today_str:
+                        day_pnl += t.get('pnl', 0)
+            
+            instructions = self.brain.get_tactical_update(
+                tick, 
+                context=context,
+                plan=self.morning_brief,
+                current_pnl=current_pnl, 
+                open_position=self.hot_path.open_position,
+                day_pnl=day_pnl,
+                symbol=self.symbol
+            )
+            if instructions:
+                # Inject pre-computed logic for Hot Path
+                instructions['atr'] = context.get('atr_14')
+                instructions['vix'] = context.get('vix')
+                instructions['morning_bias'] = self.morning_brief.get('primary_bias') if self.morning_brief else 'NEUTRAL'
+                # Add S/P/R levels for proximity filter
+                if self.morning_brief and 'boundary_levels' in self.morning_brief:
+                    levels = self.morning_brief['boundary_levels']
+                    instructions['support'] = levels.get('support_zone', 0)
+                    instructions['pivot'] = levels.get('pivot_point', 0)
+                    instructions['resistance'] = levels.get('resistance_zone', 0)
+                
+                self.hot_path.update_instructions(instructions)
+                self.journal.log_event(tick['timestamp'], "TACTICAL", instructions)
+        except KeyError as e:
+            print(f"   ❌ TACTICAL KEY ERROR: {e}")
+            print(f"      Tick Keys: {list(tick.keys())}")
+            import traceback
+            traceback.print_exc()
+        except Exception as e:
+            print(f"   ❌ TACTICAL ERROR: {e}")
+            import traceback
+            traceback.print_exc()
 
     def trigger_eod_journal(self, date):
         print(f"   [15:30] 📔 EOD Journaling & Audit...")
@@ -473,6 +499,24 @@ class BacktestMode(BaseMode):
         print(f"      📊 {summary}")
         # Log in IST
         self.journal.log_event(date.astimezone(IST).replace(hour=15, minute=30), "EOD_AUDIT", audit_res)
+        
+        # Save Experience for RAG/RL
+        stats = {
+            'total_pnl': sum(t.get('pnl', 0) for t in day_trades if t.get('pnl') is not None),
+            'trade_count': len(day_trades),
+            'win_rate': (len([t for t in day_trades if t.get('pnl', 0) > 0]) / len(day_trades) * 100) if day_trades else 0
+        }
+        
+        save_experience(
+            session_id=f"{self.session_id}_{date.strftime('%Y%m%d')}",
+            date=date,
+            symbol=self.symbol,
+            market_state=eod_data, 
+            plan=self.morning_brief,
+            trades=day_trades,
+            stats=stats,
+            audit=audit_res
+        )
         
         # 4. Reset state for next day (prevents carryover)
         self.morning_brief = None

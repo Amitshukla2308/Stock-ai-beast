@@ -18,3 +18,11 @@ services:
       - "3000:3000"
     depends_on:
       - backend
+
+  brain-viewer:
+    build:
+      context: ./dashboard/brain
+    volumes:
+      - ./data:/app/data:ro
+    ports:
+      - "8501:8501"

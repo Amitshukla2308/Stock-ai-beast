@@ -107,6 +107,34 @@ def init_db():
             regime VARCHAR
         )
     """)
+
+    # Experience Replay Table (for RL/SFT)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS experience_replay (
+            session_id VARCHAR PRIMARY KEY,
+            date DATE,
+            symbol VARCHAR,
+            market_state JSON,       -- Daily context (Trend, VIX, Gaps)
+            morning_plan JSON,       -- The AI's Strategy
+            trades JSON,             -- Execution Log
+            daily_stats JSON,        -- PnL, Drawdown, Win Rate
+            eod_audit JSON,          -- Full Brain Reflection
+            total_pnl FLOAT
+        )
+    """)
+
+    # Knowledge Nuggets Table (for RAG)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_nuggets (
+            id INTEGER PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            session_id VARCHAR,
+            category VARCHAR,        -- 'GOOD' (Reinforce) or 'BAD' (Avoid)
+            condition_tags VARCHAR,  -- e.g., "GAP_UP, HIGH_VIX, TRENDING"
+            lesson TEXT,             -- The actual text nugget
+            embedding BLOB           -- Placeholder for vector embedding
+        )
+    """)
     
     conn.close()
     print(f"✅ Database initialized at {DB_PATH}")
@@ -306,6 +334,84 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
     except Exception as e:
         print(f"❌ DB Context Fetch Error: {e}")
         return {'daily_3': [], 'last_15min': [], 'today_5min': [], 'today_15min': [], 'vix_spot': None, 'atr_14': None, 'current_range': None, 'vol_regime': 'NORMAL'}
+    finally:
+        conn.close()
+
+def save_experience(session_id, date, symbol, market_state, plan, trades, stats, audit):
+    """
+    Save the full day's experience and extracting nuggets for RAG.
+    """
+    import json
+    conn = get_connection()
+    try:
+        # 1. Experience Replay
+        conn.execute("""
+            INSERT INTO experience_replay 
+            (session_id, date, symbol, market_state, morning_plan, trades, daily_stats, eod_audit, total_pnl)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (session_id) DO UPDATE SET 
+                total_pnl = excluded.total_pnl,
+                eod_audit = excluded.eod_audit
+        """, (
+            session_id, 
+            date, 
+            symbol, 
+            json.dumps(market_state, default=str), 
+            json.dumps(plan, default=str), 
+            json.dumps(trades, default=str), 
+            json.dumps(stats, default=str), 
+            json.dumps(audit, default=str),
+            stats.get('total_pnl', 0.0)
+        ))
+        
+        # 2. Extract and Save Nuggets
+        # Look for 'nugget_good' and 'nugget_bad'
+        nuggets = []
+        if audit.get('nugget_good') and audit['nugget_good'] != 'N/A':
+            nuggets.append(('GOOD', audit['nugget_good']))
+            
+        if audit.get('nugget_bad') and audit['nugget_bad'] != 'N/A':
+            nuggets.append(('BAD', audit['nugget_bad']))
+            
+        # Also check 'what_went_well' lessons
+        for item in audit.get('what_went_well', []):
+            if isinstance(item, dict) and item.get('lesson'):
+                nuggets.append(('GOOD', item['lesson']))
+                
+        # Also check 'what_went_wrong' lessons
+        for item in audit.get('what_went_wrong', []):
+             if isinstance(item, dict) and item.get('lesson'):
+                nuggets.append(('BAD', item['lesson']))
+
+        # Construct tags from market state
+        tags = []
+        if plan:
+            tags.append(plan.get('market_personality', 'UNKNOWN'))
+            tags.append(plan.get('vix_regime', 'NORMAL'))
+            tags.append(plan.get('primary_bias', 'NEUTRAL'))
+        
+        tag_str = ",".join(tags)
+        
+        # Insert Nuggets
+        import uuid
+        for cat, lesson in nuggets:
+            # Generate random 64-bit integer ID (DuckDB INTEGER is mostly 32-bit but can hold larger? Standard SQL INT is 32-bit. 
+            # DuckDB integers: TINYINT, SMALLINT, INTEGER (4 bytes), BIGINT (8 bytes). 
+            # If schema is INTEGER, it is 4 bytes (max 2B).
+            # Let's safely use a large random int within 32-bit range or update schema to SEQUENCE.
+            # Using random 31-bit integer to be safe.
+            import random
+            nugget_id = random.randint(1, 2147483647)
+            
+            conn.execute("""
+                INSERT INTO knowledge_nuggets (id, session_id, category, condition_tags, lesson)
+                VALUES (?, ?, ?, ?, ?)
+            """, (nugget_id, session_id, cat, tag_str, lesson))
+            
+        print(f"   💾 Experience Saved: {session_id} (+{len(nuggets)} nuggets)")
+        
+    except Exception as e:
+        print(f"❌ Failed to save experience: {e}")
     finally:
         conn.close()
 
