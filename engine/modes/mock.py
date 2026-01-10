@@ -190,20 +190,56 @@ class MockMode(BaseMode):
     def trigger_eod_journal(self):
         print(f"   [15:30] 📔 EOD Journaling & Audit...")
         sid = datetime.now(IST).strftime('%Y-%m-%d')
+        
+        # Filter trades for TODAY only to avoid passing entire history to LLM
+        today_str = sid
+        day_trades = [t for t in self.hot_path.trade_ledger 
+                      if str(t.get('exit_time', ''))[:10] == today_str]
+        
         eod_data = {
             'date': sid, 
             'ticker': f"{self.symbol} (MOCK)",
-            'trades_count': len(self.hot_path.trade_ledger)
+            'trades_count': len(day_trades)
         }
         
-        summary = self.brain.get_eod_journal(
-            trades=self.hot_path.trade_ledger,
+        audit_res = self.brain.get_eod_journal(
+            trades=day_trades,
             morning_plan=self.morning_brief,
             session_id=sid,
             eod_data=eod_data,
             symbol=self.symbol
         )
-        self.journal.log_event(datetime.now(IST), "EOD_AUDIT", summary)
+        
+        # Defensive check
+        if isinstance(audit_res, dict):
+            summary = audit_res.get('audit_summary', "Audit Failed")
+        else:
+            summary = "Audit Failed (Invalid Response)"
+            
+        print(f"      📊 {summary}")
+        self.journal.log_event(datetime.now(IST), "EOD_AUDIT", audit_res)
+
+        # OPTIONAL: Save Experience for RAG/RL (Mirroring backtest)
+        from data.database import save_experience
+        stats = {
+            'total_pnl': sum(t.get('pnl', 0) for t in day_trades if t.get('pnl') is not None),
+            'trade_count': len(day_trades),
+            'win_rate': (len([t for t in day_trades if t.get('pnl', 0) > 0]) / len(day_trades) * 100) if day_trades else 0
+        }
+        
+        try:
+            save_experience(
+                session_id=f"MOCK_{sid}",
+                date=datetime.now(IST),
+                symbol=self.symbol,
+                market_state=eod_data, 
+                plan=self.morning_brief,
+                trades=day_trades,
+                stats=stats,
+                audit=audit_res
+            )
+        except Exception as e:
+            print(f"      ⚠️ Experience Save Error: {e}")
 
     def _start_redis_consumer(self):
         import threading

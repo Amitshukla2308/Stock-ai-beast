@@ -57,7 +57,7 @@ class LLMClient:
                 ],
                 temperature=0.1, # Forced deterministic
                 top_p=0.9,
-                max_tokens=1000 if not use_worker else 400 
+                max_tokens=1500 if not use_worker else 400 
             )
             content = response.choices[0].message.content
             # Strip <think> tags
@@ -71,12 +71,83 @@ class LLMClient:
             json_match = re.search(r'\{.*\}', content, flags=re.DOTALL)
             if json_match:
                 content = json_match.group(0)
+            else:
+                # If no full match, try to find the first '{' and use everything from there
+                # This helps if the closing '}' is missing (truncated)
+                first_brace = content.find('{')
+                if first_brace != -1:
+                    content = content[first_brace:]
+            
+            # Fix common LLM JSON mistakes
+            content = content.replace('}},', '},')  # Fix double braces
+            content = content.replace('"},{', '"},{"')  # Fix missing quotes
+            content = content.replace('},"', '}",')  # Fix misplaced quotes
+            
+            # Specialized "Beast" Hallucination Fixes based on session crashes:
+            # 1. Missing array key: "confirmed"},{""trade" -> "confirmed"},"what_went_well":[{"trade"
+            content = re.sub(r'}\s*,\s*{\s*""trade"', '},"what_went_well":[{"trade"', content)
+            
+            # 2. Extra quote after closing brace: "follow-through"}",what_went_wrong -> "follow-through"},"what_went_wrong
+            content = re.sub(r'}"\s*,', '},', content)
+            
+            # 3. Double-double quotes: ""trade"" -> "trade"
+            content = content.replace('""', '"')
+
+            # 4. Missing array brackets: Inject closing bracket if another key follows and bracket is unclosed
+            if '"what_went_well": [' in content and '],"what_went_wrong"' not in content:
+                 content = content.replace(',"what_went_wrong"', '],"what_went_wrong"')
+            if '"what_went_wrong": [' in content and '],"root_cause' not in content:
+                 content = content.replace(',"root_cause', '],"root_cause')
+            
+            content = re.sub(r',\s*}', '}', content)  # Remove trailing commas
+            content = re.sub(r',\s*]', ']', content)  # Remove trailing commas in arrays
             
             # Monitoring Log
             lat = (time.time() - start)
-            print(f"\n--- {role_icon} {role_name} OUTPUT ({lat:.2f}s) ---\n{content}\n-----------------------")
+            print(f"\n--- {role_icon} {role_name} OUTPUT ({lat:.2f}s) ---\n{content[:500]}...\n-----------------------")
             
-            data = json.loads(content)
+            # Try to parse JSON with error recovery
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError as e:
+                # If we are already in a retry (Validation/Fix mode), don't recurse infinitely
+                if "FIX THE FOLLOWING MALFORMED JSON" in user_msg or "RETRY WARNING" in user_msg:
+                    return None
+
+                # Try to find the position and truncate
+                print(f"      ⚠️ JSON parse error at position {e.pos}, attempting recovery...")
+                
+                # RECOVERY STRATEGY:
+                # 1. Try to find the last '}' and hope for valid JSON before it
+                last_brace_idx = content.rfind('}')
+                if last_brace_idx != -1:
+                    try:
+                        potential = content[:last_brace_idx+1]
+                        data = json.loads(potential)
+                        print(f"      ✅ JSON recovery successful (found last brace)")
+                        return data
+                    except:
+                        pass
+
+                # 2. Heuristic Truncation: 
+                # If it's a truncation error, try closing open structures
+                truncated = content[:e.pos]
+                
+                # Close any unclosed quotes
+                if truncated.count('"') % 2 != 0:
+                    truncated += '"'
+                    
+                # Count braces to balance
+                open_braces = truncated.count('{') - truncated.count('}')
+                if open_braces > 0:
+                    truncated += '}' * open_braces
+                
+                try:
+                    data = json.loads(truncated)
+                    print(f"      ✅ JSON recovery successful (heuristic truncation)")
+                except:
+                    print(f"      ❌ JSON recovery failed, returning None")
+                    return None
             
             return data
         except Exception as e:
@@ -369,8 +440,22 @@ class LLMClient:
         
         # ROUTING: BRAIN with purpose-specific system prompt
         data = self._query_model(SYSTEM_PROMPT_EOD, prompt, use_worker=False)
+        
+        # OPTION 3: VALIDATION & SELF-CORRECTION STEP
         if not data:
-            return "Could not generate audit."
+            print("      🔄 Attempting SELF-CORRECTION for EOD Audit...")
+            # Get the raw response if possible (we need to bypass slightly to get bad content)
+            # Since we can't easily get raw from _query_model if it failed, we'll trigger a 'Clean-up' call
+            # using a more aggressive 'Fixer' instructions
+            data = self._query_model(SYSTEM_PROMPT_EOD + "\n\nCRITICAL: You must output ONLY valid JSON. Double-check all brackets and quotes.", prompt + "\n\nRETRY WARNING: The last output was malformed. Fix it now.", use_worker=False)
+
+        if not data:
+            return {
+                "audit_summary": f"PnL:{total_pnl:.1f} | Audit Failed after Retry",
+                "nugget_good": "N/A",
+                "nugget_bad": "N/A",
+                "bias_efficiency": 0
+            }
             
         nugget = data.get('dataset_nugget', data.get('nugget_good', 'N/A'))
         audit_summary = f"PnL:{total_pnl:.1f} | {data.get('bias_efficiency', 'N/A')} | Nugget:{nugget}"

@@ -62,7 +62,7 @@ class BacktestMode(BaseMode):
         self.start_date = start_date
         self.end_date = end_date
         self.symbol = symbol
-        self.conn = get_connection()
+        self.conn_rw = False # Connection will be opened on-demand
         self.session_id = f"BACKTEST_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         # Components
@@ -176,8 +176,22 @@ class BacktestMode(BaseMode):
             for _, row in logs.iterrows():
                 try:
                     content = row['content']
-                    if "Nugget:" in content:
-                        nuggets.append(content.split("Nugget:")[-1].strip())
+                    # Try parsing as JSON first for clean extraction
+                    try:
+                        data = json.loads(content)
+                        # Extract from audit_summary which has the nugget appended
+                        summary = data.get('audit_summary', '')
+                        if "Nugget:" in summary:
+                            nuggets.append(summary.split("Nugget:")[-1].strip())
+                        else:
+                            # Fallback to direct nugget keys
+                            n = data.get('nugget_good', data.get('dataset_nugget'))
+                            if n and n != 'N/A':
+                                nuggets.append(n)
+                    except:
+                        # Fallback for old/corrupt logs
+                        if "Nugget:" in content:
+                            nuggets.append(content.split("Nugget:")[-1].strip().rstrip('"}'))
                 except: continue
 
             print(f"\n📈 OVERALL PERFORMANCE:")
@@ -223,7 +237,9 @@ class BacktestMode(BaseMode):
               AND timestamp <= '{date_str} 10:00:00'
             ORDER BY timestamp ASC
         """
-        df = self.conn.execute(query).fetchdf()
+        conn = get_connection()
+        df = conn.execute(query).fetchdf()
+        conn.close()
         
         # Ensure timestamp is timezone-aware UTC then convert to IST for the loop
         if not df.empty:
@@ -268,7 +284,9 @@ class BacktestMode(BaseMode):
                       AND timestamp <= '{prev_day_str} 10:00:00'
                     ORDER BY timestamp DESC LIMIT 1
                 """
-                result = self.conn.execute(prev_close_query).fetchone()
+                conn = get_connection()
+                result = conn.execute(prev_close_query).fetchone()
+                conn.close()
                 if result:
                     prev_close = result[0]
             
@@ -495,7 +513,10 @@ class BacktestMode(BaseMode):
             symbol=self.symbol
         )
         
-        summary = audit_res.get('audit_summary', "Audit Failed")
+        if isinstance(audit_res, dict):
+            summary = audit_res.get('audit_summary', "Audit Failed")
+        else:
+            summary = "Audit Failed (Invalid Response)"
         print(f"      📊 {summary}")
         # Log in IST
         self.journal.log_event(date.astimezone(IST).replace(hour=15, minute=30), "EOD_AUDIT", audit_res)

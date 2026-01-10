@@ -19,15 +19,39 @@ def get_fyers_symbol(symbol):
 
 def get_connection():
     """
-    Returns a connection to the DuckDB database.
+    Returns a connection to the DuckDB database with retry logic for handling lock contention.
     """
-    print(f"   📂 Connecting to DB: {os.path.abspath(DB_PATH)}")
-    if os.path.exists(DB_PATH):
-        print(f"   ✅ File Exists. Size: {os.path.getsize(DB_PATH)} bytes")
-    else:
-        print(f"   ⚠️ File NOT Found. Creating new one.")
-    conn = duckdb.connect(DB_PATH)
-    return conn
+    import time
+    max_retries = 5
+    retry_delay = 1.0  # seconds
+    
+    # Use consistent absolute path to avoid configuration mismatch
+    db_path = os.path.abspath(DB_PATH)
+    
+    # Common container paths fallback
+    if not os.path.exists(db_path):
+        for alt_path in ["/app/data/trading.db", "trading.db", "data/trading.db"]:
+            if os.path.exists(alt_path):
+                db_path = os.path.abspath(alt_path)
+                break
+
+    for attempt in range(max_retries):
+        try:
+            # Always connect in standard mode to avoid "different configuration" errors
+            conn = duckdb.connect(db_path)
+            return conn
+        except duckdb.IOException as e:
+            if "Could not set lock" in str(e) or "Conflicting lock" in str(e):
+                if attempt < max_retries - 1:
+                    print(f"      ⚠️ DB Locked (Attempt {attempt+1}/{max_retries}). Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+            raise e
+        except Exception as e:
+            raise e
+    
+    return duckdb.connect(db_path)
 
 def init_db():
     """

@@ -7,14 +7,13 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 import duckdb
-from datetime import datetime, time as dt_time
+import time
+from datetime import datetime, time as dt_time, timedelta
+from data.database import get_connection
 from brokers.fyers.connector import get_fyers_model
-from engine.contract_selector import select_option_contract
-
-DB_PATH = os.path.join(project_root, "data/trading.db")
 
 def init_db():
-    conn = duckdb.connect(DB_PATH)
+    conn = get_connection()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS option_chain (
             timestamp TIMESTAMP,
@@ -79,11 +78,6 @@ def record_data():
             symbols = []
             strike_map = {} # symbol -> strike/type
             
-            # We need to manually construct symbol or match logic 
-            # Reusing contract_selector logic but modified for NIFTY
-            # NOTE: contract_selector is currently hardcoded for BANKNIFTY in the file I saw earlier
-            # I will implement raw logic here for Nifty
-            
             # Calculate Expiry (Nearest Thursday for Nifty)
             today = datetime.now()
             # 0=Mon, 3=Thu. 
@@ -125,7 +119,7 @@ def record_data():
                         ))
                 
                 # 5. Insert to DB
-                conn = duckdb.connect(DB_PATH)
+                conn = get_connection()
                 conn.executemany("INSERT INTO option_chain VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
                 conn.close()
                 print(f"   [{timestamp.strftime('%H:%M:%S')}] 💾 Saved {len(rows)} ticks. NIFTY: {spot_price}")

@@ -315,8 +315,32 @@ AUDIT TASKS:
    - nugget_good: One sentence about what worked
    - nugget_bad: One sentence about what to avoid
 
+SAMPLE RESPONSE (FOLLOW THIS STRUCTURE EXACTLY):
+{
+  "date": "2025-07-17",
+  "pnl_final": -19.15,
+  "bias_efficiency": 0.6,
+  "morning_prediction_accuracy": {
+    "predicted": "TRENDING",
+    "actual": "CHOPPY",
+    "score": 0.4,
+    "early_warning_missed": "None"
+  },
+  "what_went_well": [
+     {"trade": "CALL @ 11:15", "market_condition": "TRENDING", "decision": "Good breakout", "lesson": "Keep it up"}
+  ],
+  "what_went_wrong": [
+     {"trade": "PUT @ 09:45", "market_condition": "CHOPPY", "mistake": "Overtrading", "lesson": "Wait for signal"}
+  ],
+  "root_cause_of_losses": "CHOPPY_MARKET",
+  "optimal_strategy_retro": "Scalping would have worked better",
+  "nugget_good": "In ranging markets, avoid breakouts.",
+  "nugget_bad": "Don't chase gaps.",
+  "final_online_feedback": "Be more patient tomorrow."
+}
+
 OUTPUT FORMAT:
-{"date":"<session_id>","pnl_final":<f>,"bias_efficiency":<0-1>,"morning_prediction_accuracy":{"predicted":"<TRENDING/CHOPPY>","actual":"<what happened>","score":<0-1>,"early_warning_missed":"<signal>"},"what_went_well":[{"trade":"<CALL/PUT at time>","market_condition":"<trend/range>","decision":"<what was right>","lesson":"<insight>"}],"what_went_wrong":[{"trade":"<CALL/PUT at time>","market_condition":"<condition>","mistake":"<what was wrong>","lesson":"<avoid this>"}],"root_cause_of_losses":"SL_HUNT|WRONG_BIAS|LATE_EXIT|IGNORED_REVERSAL|OVERTRADING|NONE","optimal_strategy_retro":"<best strategy in hindsight>","nugget_good":"In [condition], do [action] - it works","nugget_bad":"In [condition], avoid [action] - it fails","final_online_feedback":"<one sentence directive for tomorrow>"}
+Output ONLY the JSON object. No extra text, no markdown.
 """
 
 USER_PROMPT_EOD = """
