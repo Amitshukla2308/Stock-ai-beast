@@ -35,6 +35,7 @@ class MarketSimulator:
         """
         return self.conn.execute(query).fetchdf()
 
+    def run(self):
         """
         Main Event Loop
         """
@@ -174,6 +175,14 @@ class MarketSimulator:
 if __name__ == "__main__":
     import argparse
     import sys
+    from engine.auth_fyers import authenticate_fyers
+    
+    # 1. Ensure Authentication
+    try:
+        authenticate_fyers()
+    except Exception as e:
+        print(f"❌ Auth Failed: {e}")
+        sys.exit(1)
     
     parser = argparse.ArgumentParser(description="Run Stock AI Beast Simulation")
     parser.add_argument("--days", type=int, default=5, help="Number of recent days to simulate")

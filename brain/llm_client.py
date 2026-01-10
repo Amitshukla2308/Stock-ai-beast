@@ -18,32 +18,18 @@ class LLMClient:
         self.brain_api_key = os.getenv("BRAIN_API_KEY", "EMPTY")
         self.brain_model = os.getenv("BRAIN_MODEL_NAME", "Qwen/Qwen2.5-14B-Instruct-Q8")
         
-        # --- WORKER CONFIG (Tactical / Qwen 1.5B) ---
-        self.worker_api_base = os.getenv("WORKER_API_BASE", "http://localhost:8001/v1")
-        self.worker_api_key = os.getenv("WORKER_API_KEY", "EMPTY")
-        self.worker_model = os.getenv("WORKER_MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct")
-
-        # Initialize Clients
+        # Initialize Client
         print(f"🧠 Brain Connecting to: {self.brain_model} at {self.brain_api_base}")
         self.brain_client = OpenAI(base_url=self.brain_api_base, api_key=self.brain_api_key, timeout=90.0)
-        
-        print(f"👷 Worker Connecting to: {self.worker_model} at {self.worker_api_base}")
-        self.worker_client = OpenAI(base_url=self.worker_api_base, api_key=self.worker_api_key, timeout=10.0)
 
-    def _query_model(self, system_msg, user_msg, use_worker=False):
-        """Generic wrapper with routing logic"""
+    def _query_model(self, system_msg, user_msg):
+        """Generic wrapper"""
         start = time.time()
         
-        if use_worker:
-            client = self.worker_client
-            model = self.worker_model
-            role_icon = "👷"
-            role_name = "WORKER"
-        else:
-            client = self.brain_client
-            model = self.brain_model
-            role_icon = "🧠"
-            role_name = "BRAIN"
+        client = self.brain_client
+        model = self.brain_model
+        role_icon = "🧠"
+        role_name = "BRAIN"
 
         try:
             # Log System Prompt for visibility
@@ -57,7 +43,7 @@ class LLMClient:
                 ],
                 temperature=0.1, # Forced deterministic
                 top_p=0.9,
-                max_tokens=1500 if not use_worker else 400 
+                max_tokens=1500 
             )
             content = response.choices[0].message.content
             # Strip <think> tags
@@ -218,7 +204,7 @@ class LLMClient:
         print(f"\n--- 🧠 BRAIN INPUT (MORNING) ---\n{prompt}\n--------------------------------")
         
         # ROUTING: BRAIN with purpose-specific system prompt
-        data = self._query_model(SYSTEM_PROMPT_MORNING, prompt, use_worker=False)
+        data = self._query_model(SYSTEM_PROMPT_MORNING, prompt)
         
         if data:
             # Inject pre-calculated levels into response (script-calculated, not LLM)
@@ -349,8 +335,8 @@ class LLMClient:
         
         print(f"\n--- 👷 WORKER INPUT (TACTICAL) ---\n{prompt}\n--------------------------------")
         
-        # ROUTING: WORKER with purpose-specific system prompt
-        data = self._query_model(SYSTEM_PROMPT_TACTICAL, prompt, use_worker=True)
+        # ROUTING: BRAIN with purpose-specific system prompt (Was WORKER)
+        data = self._query_model(SYSTEM_PROMPT_TACTICAL, prompt)
         
         if data:
             # Output Normalization & Calculation
@@ -439,7 +425,7 @@ class LLMClient:
         print(f"\n--- 🧠 BRAIN INPUT (EOD) ---\n{prompt}\n--------------------------------")
         
         # ROUTING: BRAIN with purpose-specific system prompt
-        data = self._query_model(SYSTEM_PROMPT_EOD, prompt, use_worker=False)
+        data = self._query_model(SYSTEM_PROMPT_EOD, prompt)
         
         # OPTION 3: VALIDATION & SELF-CORRECTION STEP
         if not data:
@@ -447,7 +433,7 @@ class LLMClient:
             # Get the raw response if possible (we need to bypass slightly to get bad content)
             # Since we can't easily get raw from _query_model if it failed, we'll trigger a 'Clean-up' call
             # using a more aggressive 'Fixer' instructions
-            data = self._query_model(SYSTEM_PROMPT_EOD + "\n\nCRITICAL: You must output ONLY valid JSON. Double-check all brackets and quotes.", prompt + "\n\nRETRY WARNING: The last output was malformed. Fix it now.", use_worker=False)
+            data = self._query_model(SYSTEM_PROMPT_EOD + "\n\nCRITICAL: You must output ONLY valid JSON. Double-check all brackets and quotes.", prompt + "\n\nRETRY WARNING: The last output was malformed. Fix it now.")
 
         if not data:
             return {

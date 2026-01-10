@@ -14,37 +14,6 @@ services:
       timeout: 3s
       retries: 5
 
-  vllm:
-    image: vllm/vllm-openai:latest
-    container_name: beast_brain
-    runtime: nvidia
-    environment:
-      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
-      - TORCH_CUDA_ARCH_LIST=12.0
-      - LIBRARY_PATH=/usr/local/cuda/lib64/stubs
-    volumes:
-      - D:/AI_HUB/models/huggingface:/root/.cache/huggingface
-    ports:
-      - "8000:8000"
-    ipc: host
-    command: >
-      --model /root/.cache/huggingface/hub/Qwen3-30B-A3B-Instruct-AWQ --quantization awq --dtype half --gpu-memory-utilization 0.90 --max-model-len 8192 --enforce-eager --kv-cache-dtype fp8
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
-    networks:
-      - beast_net
-    healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://localhost:8000/health || exit 1" ]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 60s
-
   beast-engine:
     build: .
     container_name: beast_engine
@@ -52,11 +21,11 @@ services:
     environment:
       - REDIS_HOST=beast_redis
       - REDIS_PORT=6379
-      - VLLM_API_BASE=http://beast_brain:8000/v1
-      - BRAIN_API_BASE=http://beast_brain:8000/v1
+      - VLLM_API_BASE=http://host.docker.internal:8000/v1
+      - BRAIN_API_BASE=http://host.docker.internal:8000/v1
       - BRAIN_API_KEY=EMPTY
       - BRAIN_MODEL_NAME=/root/.cache/huggingface/hub/Qwen3-30B-A3B-Instruct-AWQ
-      - WORKER_API_BASE=http://beast_brain:8000/v1
+      - WORKER_API_BASE=http://host.docker.internal:8000/v1
       - WORKER_API_KEY=EMPTY
       - WORKER_MODEL_NAME=/root/.cache/huggingface/hub/Qwen3-30B-A3B-Instruct-AWQ
       - FYERS_CLIENT_ID=${FYERS_CLIENT_ID}
@@ -68,9 +37,9 @@ services:
       - ${PWD}:/app
       - ${PWD}/data:/app/data # Keep specific data mount if needed, but root mount covers it
       - ${PWD}/logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      vllm:
-        condition: service_healthy
       redis:
         condition: service_healthy
     networks:

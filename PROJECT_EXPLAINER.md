@@ -1,4 +1,4 @@
-# 🐉 Project Explainer: Stock AI Beast (v4.0)
+# 🐉 Project Explainer: Stock AI Beast (v4.1 - Single Model)
 **The Sovereign Algorithmic Trading Engine**
 
 ---
@@ -25,8 +25,8 @@ Elite traders lose money not because they can't see the trend, but because they 
 The Beast splits the system into two distinct workflows:
 
 ### A. The Cold Path (Strategic Intelligence)
-*   **Frequency**: Every 15 minutes (or on major events).
-*   **Engine**: High-parameter LLMs (Qwen 14B/32B).
+*   **Frequency**: Pre-market (09:15) and Intraday (15min intervals).
+*   **Engine**: Single High-Intelligence LLM (e.g., Qwen-30B/LLaMA-70B via vLLM).
 *   **Function**: Context synthesis. It analyzes multi-timeframe trends, VIX volatility, and Options Greeks to issue "Tactical Intent." It doesn't execute; it **commands**.
 
 ### B. The Hot Path (Deterministic Execution)
@@ -45,8 +45,7 @@ graph TD
     end
 
     subgraph "COLD PATH (Strategic - 15m Loop)"
-        B[Brain: Strategic Brief] --> |Morning Plan| W[Worker: Tactical Agent]
-        W --> |Instructions| P[Tactical Intent JSON]
+        B[Brain: Strategic Intelligence] --> |Analysis| P[Tactical Intent JSON]
     end
 
     subgraph "HOT PATH (Execution - Realtime)"
@@ -66,9 +65,9 @@ graph TD
 ### Flow Breakdown:
 1.  **Ingestion**: Market Data is prefilled into DuckDB for historical context and streamed via Redis for live updates.
 2.  **Stratification**: The **Brain** creates a "Personality Brief" at 9:15 AM (Trending/Choppy/Gap-Fill).
-3.  **Instruction**: The **Worker** generates a "Tactical Intent" every 15 minutes, defining the exact Entry-Low, Entry-High, SL, and Target based on current VIX.
+3.  **Instruction**: The **Brain** (revisiting continuously) generates a "Tactical Intent" every 15 minutes, defining the exact Entry-Low, Entry-High, SL, and Target based on current VIX.
 4.  **Enforcement**: The **HotPathExecutor** monitors the price. If price enters the range, it submits the order. If SL is hit, it cuts the trade instantly.
-5.  **Recursive Tuning**: After 3:30 PM, the **Auditor** reviews every trade. It identifies *Greed Gaps* (where PnL was peak but not taken) and writes a "Nugget" (e.g., *"In Panic VIX, trailing stops must be tightened at +20pts"*).
+5.  **Recursive Tuning**: After 3:30 PM, the **Brain** (acting as Auditor) reviews every trade. It identifies *Greed Gaps* (where PnL was peak but not taken) and writes a "Nugget".
 
 ---
 
