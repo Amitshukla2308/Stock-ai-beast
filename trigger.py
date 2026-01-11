@@ -18,7 +18,7 @@ def kill_existing():
         pass
     time.sleep(1)
 
-def trigger(mode, days, debug, symbol="BANKNIFTY", start_date=None, end_date=None, balance=30000):
+def trigger(mode, days, debug, symbol="NIFTY", start_date=None, end_date=None, balance=30000):
     kill_existing()
     print(f"🔥 Triggering Mode: {mode.upper()} for {symbol}")
 
@@ -76,7 +76,7 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=5, help="Days for backtest/mock")
     parser.add_argument("--start-date", type=str, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD)")
-    parser.add_argument("--symbol", type=str, default="BANKNIFTY", help="Ticker symbol")
+    parser.add_argument("--symbol", type=str, default="NIFTY", help="Ticker symbol")
     parser.add_argument("--balance", type=int, default=30000, help="Starting balance in rupees (default: 30000)")
     parser.add_argument("--debug", action="store_true", help="Enable fast schedule for testing")
     

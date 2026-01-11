@@ -6,9 +6,11 @@ from brain.llm_client import LLMClient
 from hot_path.executor import HotPathExecutor
 from engine.journal import Journal
 from engine.modes.base_mode import BaseMode
+import logging
 
 IST = pytz.timezone('Asia/Kolkata')
 UTC = pytz.utc
+logger = logging.getLogger(__name__)
 
 # Constants for balance calculation
 PTS_TO_RUPEES = 27.5  # 1 NIFTY pt = ₹27.5 (50 qty × 0.55 delta)
@@ -42,7 +44,7 @@ class BalanceMonitor:
             self.wipeout_count += 1
             old_balance = self.current_balance
             self.current_balance = self.initial_balance
-            print(f"      💀 WIPEOUT #{self.wipeout_count}! Balance ₹{old_balance:.0f} < ₹{MARGIN_PER_LOT} → Reset to ₹{self.initial_balance}")
+            logger.info(f"      💀 WIPEOUT #{self.wipeout_count}! Balance ₹{old_balance:.0f} < ₹{MARGIN_PER_LOT} → Reset to ₹{self.initial_balance}")
             
         return self.current_balance
     
@@ -58,7 +60,7 @@ class BalanceMonitor:
         }
 
 class BacktestMode(BaseMode):
-    def __init__(self, start_date, end_date, symbol="BANKNIFTY", initial_balance=30000):
+    def __init__(self, start_date, end_date, symbol="NIFTY", initial_balance=30000):
         self.start_date = start_date
         self.end_date = end_date
         self.symbol = symbol
@@ -79,9 +81,16 @@ class BacktestMode(BaseMode):
         self.morning_brief = None
         self.running = False
 
+
+
     def start(self):
         """Run the Historical Backtest"""
-        print(f"📊 Starting Backtest Mode: {self.start_date.date()} to {self.end_date.date()} (Session: {self.session_id})")
+        # Ensure Brain is Awake
+        if not self.brain.wait_for_model_ready():
+            logger.error("🛑 CRITICAL: Brain failed to load. Aborting Backtest.")
+            return
+
+        logger.info(f"📊 Starting Backtest Mode: {self.start_date.date()} to {self.end_date.date()} (Session: {self.session_id})")
         
         # Register session metadata
         self.journal.register_session(
@@ -98,14 +107,14 @@ class BacktestMode(BaseMode):
 
     def stop(self):
         self.running = False
-        print("🛑 Backtest Stopped")
+        logger.info("🛑 Backtest Stopped")
         self.print_final_summary()
 
     def print_final_summary(self):
         """Aggregate results from Journal for this backtest session"""
-        print("\n\n" + "="*80)
-        print(f"🏁 FINAL BACKTEST REPORT | Session: {self.session_id}")
-        print("="*80)
+        logger.info("\n\n" + "="*80)
+        logger.info(f"🏁 FINAL BACKTEST REPORT | Session: {self.session_id}")
+        logger.info("="*80)
         
         try:
             from data.database import get_connection
@@ -147,16 +156,16 @@ class BacktestMode(BaseMode):
                 avg_max_pnl = trades_df['max_pnl'].mean() if total_trades > 0 else 0
                 avg_mean_open_pnl = trades_df['mean_open_pnl'].mean() if total_trades > 0 else 0
                 
-                print("\n📊 AGGREGATED STATISTICS:")
-                print("-"*60)
-                print(f"   Highest Trades Day:    {max_trade_day['date']} ({int(max_trade_day['trades'])} trades → {max_trade_pnl_str} pts)")
-                print(f"   Avg Trades/Day:        {avg_trades_per_day:.1f}")
-                print(f"   Days with No Trades:   {days_with_no_trades}")
-                print(f"   Avg Profit/Win:        +{avg_win:.1f} pts")
-                print(f"   Avg Loss/Lose:         {avg_loss:.1f} pts")
-                print(f"   Avg Peak Profit (MFE): +{avg_max_pnl:.1f} pts")
-                print(f"   Overall Mean Open PnL: +{avg_mean_open_pnl:.1f} pts")
-                print("-"*60)
+                logger.info("\n📊 AGGREGATED STATISTICS:")
+                logger.info("-"*60)
+                logger.info(f"   Highest Trades Day:    {max_trade_day['date']} ({int(max_trade_day['trades'])} trades → {max_trade_pnl_str} pts)")
+                logger.info(f"   Avg Trades/Day:        {avg_trades_per_day:.1f}")
+                logger.info(f"   Days with No Trades:   {days_with_no_trades}")
+                logger.info(f"   Avg Profit/Win:        +{avg_win:.1f} pts")
+                logger.info(f"   Avg Loss/Lose:         {avg_loss:.1f} pts")
+                logger.info(f"   Avg Peak Profit (MFE): +{avg_max_pnl:.1f} pts")
+                logger.info(f"   Overall Mean Open PnL: +{avg_mean_open_pnl:.1f} pts")
+                logger.info("-"*60)
             
             # Overall Max Drawdown (Equity Curve)
             max_dd = 0
@@ -194,35 +203,54 @@ class BacktestMode(BaseMode):
                             nuggets.append(content.split("Nugget:")[-1].strip().rstrip('"}'))
                 except: continue
 
-            print(f"\n📈 OVERALL PERFORMANCE:")
-            print(f"   - Total PnL:     {total_pnl:+.2f} points")
-            print(f"   - Max Drawdown:  {abs(max_dd):.2f} points")
-            print(f"   - Win Rate:      {win_rate:.1f}% ({total_trades} trades)")
+            logger.info(f"\n📈 OVERALL PERFORMANCE:")
+            logger.info(f"   - Total PnL:     {total_pnl:+.2f} points")
+            logger.info(f"   - Max Drawdown:  {abs(max_dd):.2f} points")
+            logger.info(f"   - Win Rate:      {win_rate:.1f}% ({total_trades} trades)")
             
             # Balance Monitor Summary
             if self.balance_monitor:
                 bal = self.balance_monitor.get_summary()
                 rupee_pnl = bal['net_pnl_rupees']
                 pnl_color = "+" if rupee_pnl >= 0 else ""
-                print(f"\n💰 CAPITAL TRACKING:")
-                print(f"   - Initial Balance:   ₹{bal['initial_balance']:,}")
-                print(f"   - Final Balance:     ₹{bal['current_balance']:,.0f}")
-                print(f"   - Net P&L (₹):       {pnl_color}₹{rupee_pnl:,.0f}")
-                print(f"   - Wipeouts:          {bal['wipeout_count']} (resets when < ₹10,000)")
+                logger.info(f"\n💰 CAPITAL TRACKING:")
+                logger.info(f"   - Initial Balance:   ₹{bal['initial_balance']:,}")
+                logger.info(f"   - Final Balance:     ₹{bal['current_balance']:,.0f}")
+                logger.info(f"   - Net P&L (₹):       {pnl_color}₹{rupee_pnl:,.0f}")
+                logger.info(f"   - Wipeouts:          {bal['wipeout_count']} (resets when < ₹10,000)")
 
             
-            print("\n💎 COLLECTED KNOWLEDGE (Fine-Tuning Nuggets):")
+            logger.info("\n💎 COLLECTED KNOWLEDGE (Fine-Tuning Nuggets):")
             if not nuggets:
-                print("   - No nuggets collected this session.")
+                logger.info("   - No nuggets collected this session.")
             else:
                 for idx, n in enumerate(nuggets, 1):
                     # Dedup nuggets if they repeat
-                    print(f"   [{idx}] {n}")
+                    logger.info(f"   [{idx}] {n}")
             
-            print("="*80 + "\n")
+            logger.info("="*80 + "\n")
+            # TELEGRAM NOTIFICATION (Final Summary)
+            summary_payload = {
+                "total_pnl": total_pnl,
+                "max_dd": abs(max_dd),
+                "win_rate": win_rate,
+                "total_trades": total_trades,
+                "nuggets": nuggets if nuggets else []
+            }
+            
+            if self.balance_monitor:
+                bal = self.balance_monitor.get_summary()
+                summary_payload['balance'] = {
+                    "initial": bal['initial_balance'],
+                    "final": bal['current_balance'],
+                    "net_pnl": bal['net_pnl_rupees'],
+                    "wipeouts": bal['wipeout_count']
+                }
+                
+            self._emit_telegram_event("SUMMARY", summary_payload, mode_tag="BACKTEST")
             conn.close()
         except Exception as e:
-            print(f"   ❌ Final Reporting Error: {e}")
+            logger.error(f"   ❌ Final Reporting Error: {e}")
 
     def fetch_data_for_day(self, date):
         """Fetch 5-min candles for the specific day (Database is in UTC)"""
@@ -253,13 +281,13 @@ class BacktestMode(BaseMode):
         current_date = self.start_date
         
         while current_date <= self.end_date and self.running:
-            print(f"🌞 Simulating Day: {current_date.date()}")
+            logger.info(f"🌞 Simulating Day: {current_date.date()}")
             
             # 1. Fetch Day's Tick Data
             day_ticks = self.fetch_data_for_day(current_date)
             
             if day_ticks.empty:
-                print("   ⚠️ No data for this day. Skipping.")
+                logger.info("   ⚠️ No data for this day. Skipping.")
                 current_date += timedelta(days=1)
                 continue
 
@@ -319,17 +347,17 @@ class BacktestMode(BaseMode):
                     }
                     
                     if gap_type != 'NORMAL':
-                        print(f"   ⚡ GAP DETECTED: {gap_direction} {abs(gap_pts):.0f}pts ({abs(gap_pct):.1f}%) - {gap_type}")
+                        logger.info(f"   ⚡ GAP DETECTED: {gap_direction} {abs(gap_pts):.0f}pts ({abs(gap_pct):.1f}%) - {gap_type}")
                     gap_analyzed = True
                 
                 # A2. EARLY Morning Briefing @ 09:20 for SIGNIFICANT/EXTREME gaps
                 if not morning_brief_done and gap_analyzed and gap_info and gap_info['type'] in ['SIGNIFICANT', 'EXTREME'] and current_time.time() >= time(9, 20):
-                    print(f"   ⚡ EARLY BRIEF triggered due to {gap_info['type']} gap")
+                    logger.info(f"   ⚡ EARLY BRIEF triggered due to {gap_info['type']} gap")
                     self.trigger_morning_brief(current_date, first_tick=tick, gap_info=gap_info)
                     morning_brief_done = True
                     # For EXTREME gaps, trigger immediate tactical
                     if gap_info['type'] == 'EXTREME':
-                        print(f"   ⚡ IMMEDIATE TACTICAL for {gap_info['type']} gap")
+                        logger.info(f"   ⚡ IMMEDIATE TACTICAL for {gap_info['type']} gap")
                         self.trigger_tactical_update(tick)
                     last_tactical_update = current_time
                 
@@ -350,7 +378,7 @@ class BacktestMode(BaseMode):
                         last_tactical_update = current_time
                         last_heartbeat_time = current_time # Reset heartbeat on tactical update
                     except Exception as e:
-                        print(f"   ❌ Tactical Update Error at {current_time}: {e}")
+                        logger.error(f"   ❌ Tactical Update Error at {current_time}: {e}")
                     
                 # D. Heartbeat Log removed for compact output - trade executions provide sufficient visibility
             
@@ -373,6 +401,17 @@ class BacktestMode(BaseMode):
              for trade in self.hot_path.trades:
                  if trade.get('type') == 'EXIT':
                      self.journal.log_trade(trade)
+                     
+                     # TELEGRAM NOTIFICATION
+                     self._emit_telegram_event("TRADE", {
+                         "date": tick['timestamp'].strftime('%Y-%m-%d'),
+                         "side": trade.get('side'),
+                         "entry": trade.get('entry_price'),
+                         "exit": trade.get('exit_price'),
+                         "pnl": trade.get('pnl'),
+                         "reason": trade.get('reason'),
+                         "balance": self.balance_monitor.current_balance
+                     }, mode_tag="BACKTEST")
              self.hot_path.trades = [] # Clear buffer
 
     def should_trigger_tactical(self, current_time, last_update):
@@ -389,9 +428,9 @@ class BacktestMode(BaseMode):
 
     def trigger_morning_brief(self, date, first_tick=None, gap_info=None):
         if gap_info and gap_info['type'] != 'NORMAL':
-            print(f"   [09:20] 🧠 EARLY Morning Briefing ({gap_info['type']} Gap)...")
+            logger.info(f"   [09:20] 🧠 EARLY Morning Briefing ({gap_info['type']} Gap)...")
         else:
-            print(f"   [09:30] 🧠 Morning Briefing...")
+            logger.info(f"   [09:30] 🧠 Morning Briefing...")
         
         # Ensure we use the tick timestamp for precise context
         ts = first_tick['timestamp'] if first_tick else date.astimezone(IST).replace(hour=9, minute=30)
@@ -414,7 +453,7 @@ class BacktestMode(BaseMode):
         brief = self.brain.get_morning_brief(mb_context, current_tick=first_tick, symbol=self.symbol)
         
         if not brief:
-             print("      ⚠️ Brain Malfunction (Morning). Using Default Passive Plan.")
+             logger.info("      ⚠️ Brain Malfunction (Morning). Using Default Passive Plan.")
              brief = {
                  'market_personality': 'UNKNOWN',
                  'vix_regime': 'NORMAL',
@@ -423,9 +462,17 @@ class BacktestMode(BaseMode):
              }
 
         logic = brief.get('morning_logic', brief.get('market_logic', "No Logic Provided"))
-        print(f"      📝 Plan: {logic}")
+        logger.info(f"      📝 Plan: {logic}")
         self.morning_brief = brief 
         self.journal.log_event(ts, "MORNING", brief)
+        
+        # TELEGRAM NOTIFICATION
+        self._emit_telegram_event("MORNING_BRIEF", {
+            "date": ts.strftime('%Y-%m-%d'),
+            "personality": brief.get('market_personality'),
+            "bias": brief.get('primary_bias'),
+            "plan": logic
+        }, mode_tag="BACKTEST")
 
     def trigger_tactical_update(self, tick):
         if isinstance(tick, pd.Series): tick = tick.to_dict()
@@ -481,17 +528,17 @@ class BacktestMode(BaseMode):
                 self.hot_path.update_instructions(instructions)
                 self.journal.log_event(tick['timestamp'], "TACTICAL", instructions)
         except KeyError as e:
-            print(f"   ❌ TACTICAL KEY ERROR: {e}")
-            print(f"      Tick Keys: {list(tick.keys())}")
+            logger.error(f"   ❌ TACTICAL KEY ERROR: {e}")
+            logger.error(f"      Tick Keys: {list(tick.keys())}")
             import traceback
             traceback.print_exc()
         except Exception as e:
-            print(f"   ❌ TACTICAL ERROR: {e}")
+            logger.error(f"   ❌ TACTICAL ERROR: {e}")
             import traceback
             traceback.print_exc()
 
     def trigger_eod_journal(self, date):
-        print(f"   [15:30] 📔 EOD Journaling & Audit...")
+        logger.info(f"   [15:30] 📔 EOD Journaling & Audit...")
         
         # 1. Filter trades for THIS day only
         day_trades = [t for t in self.hot_path.trade_ledger 
@@ -517,9 +564,24 @@ class BacktestMode(BaseMode):
             summary = audit_res.get('audit_summary', "Audit Failed")
         else:
             summary = "Audit Failed (Invalid Response)"
-        print(f"      📊 {summary}")
+        logger.info(f"      📊 {summary}")
         # Log in IST
         self.journal.log_event(date.astimezone(IST).replace(hour=15, minute=30), "EOD_AUDIT", audit_res)
+        
+        # TELEGRAM NOTIFICATION
+        stats = {
+            'total_pnl': sum(t.get('pnl', 0) for t in day_trades if t.get('pnl') is not None),
+            'trade_count': len(day_trades),
+            'win_rate': (len([t for t in day_trades if t.get('pnl', 0) > 0]) / len(day_trades) * 100) if day_trades else 0
+        }
+        self._emit_telegram_event("EOD", {
+            "date": date.strftime('%Y-%m-%d'),
+            "summary": summary,
+            "total_pnl": stats.get('total_pnl'),
+            "trades": stats.get('trade_count'),
+            "win_rate": stats.get('win_rate'),
+            "nugget": audit_res.get('dataset_nugget', audit_res.get('nugget_good', 'N/A'))
+        }, mode_tag="BACKTEST")
         
         # Save Experience for RAG/RL
         stats = {

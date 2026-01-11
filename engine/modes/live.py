@@ -9,6 +9,7 @@ class LiveMode(MockMode):
     """
     def __init__(self, debug_schedule=False, symbol="BANKNIFTY"):
         super().__init__(debug_schedule, symbol=symbol)
+        self.mode_tag = "LIVE"
         
         # Initialize Broker
         print("   🔴 Initializing LIVE Broker (Fyers)")
@@ -102,4 +103,29 @@ class LiveMode(MockMode):
                        )
                   
                   self.journal.log_trade(trade)
+
+                  # TELEGRAM NOTIFICATION (Live Trade)
+                  self._emit_telegram_event("TRADE", {
+                      "date": tick['timestamp'].strftime('%Y-%m-%d'),
+                      "side": trade.get('side'),
+                      "entry": trade.get('entry_price'),
+                      "exit": trade.get('exit_price'), # Likely N/A for entry? Wait.
+                      # Be careful: This block executes after ENTRY or EXIT.
+                      # If ENTRY: exit_price is None.
+                      # The n8n logic might need to handle OPEN trades? 
+                      # Or we only emit on EXIT?
+                      # The MockMode logic emits on EXIT.
+                      # But LiveMode logic here processes FILL.
+                      # If ENTRY fill -> we should notify specific ENTRY event?
+                      # Or stick to EXIT only?
+                      # Be consistent with Backtest/Mock.
+                      # Backtest/Mock only notify on EXIT (closed trade).
+                      # LiveMode logic here iterates hot_path.trades which contains COMPLETED actions from Executor?
+                      # No, executor sets type='ENTRY' or 'EXIT'.
+                      # So we should check `if not is_entry:`.
+                      "pnl": trade.get('pnl', 0),
+                      "reason": trade.get('reason'),
+                      "balance": "REAL"
+                  }, mode_tag="LIVE") if not is_entry else None
+                   
              self.hot_path.trades = []

@@ -180,38 +180,82 @@ def ensure_data_v2(symbol, days=5, resolution="5", table_name="candles_5min", st
         return
 
     # Fetch in 1-day chunks for 1-minute data 
-    chunk_size = 1 if resolution == "1" else 30
-    current_start = effective_start
-    total_added = 0
+    # --- SMART GAP FILL (SYNC FROM GAP) ---
+    # 1. Get existing dates in DB
+    existing_dates_query = f"SELECT DISTINCT strftime('%Y-%m-%d', timestamp) FROM {table_name} WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?"
+    existing_dates_res = conn.execute(existing_dates_query, (symbol, effective_start, effective_end)).fetchall()
+    existing_dates = set(r[0] for r in existing_dates_res)
     
-    while current_start < effective_end:
-        current_end = min(current_start + timedelta(days=chunk_size), effective_end)
-        if resolution == "1":
-            print(f"      ⏳ {current_start.date()}...", end="\r")
-
-        candles = fetch_history(fyers, symbol, current_start, current_end, resolution)
+    # 2. Find the FIRST missing day (or Today) to start sync from
+    sync_start_date = None
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    
+    current_day = effective_start
+    while current_day.date() <= effective_end.date():
+        day_str = current_day.strftime('%Y-%m-%d')
         
-        if candles:
-            df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['symbol'] = symbol
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+        # Condition A: Day is completely missing
+        if day_str not in existing_dates:
+            print(f"      🔎 Found Gap at {day_str}. Syncing from here...")
+            sync_start_date = current_day
+            break
             
-            rows_to_insert = []
-            for _, row in df.iterrows():
-                rows_to_insert.append((
-                    row['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), 
-                    row['symbol'], 
-                    row['open'], row['high'], row['low'], row['close'], row['volume']
-                ))
-
-            try:
-                conn.executemany(f"INSERT OR IGNORE INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?)", rows_to_insert)
-                total_added += len(rows_to_insert)
-            except Exception as e:
-                print(f"   ⚠️ Insert Error: {e}")
+        # Condition B: Day is present, but it is TODAY (Likely partial data, need update)
+        if day_str == today_str:
+             print(f"      🔎 updating Today ({day_str}) for latest data...")
+             sync_start_date = current_day
+             break
         
-        current_start = current_end
-        time.sleep(0.5 if resolution == "1" else 0.1) 
+        current_day += timedelta(days=1)
+        
+    # 3. Fetch from sync_start_date to effective_end (if sync needed)
+    if sync_start_date:
+        print(f"      📥 Fetching range: {sync_start_date.date()} ➡ {effective_end.date()} ...")
+        
+        # We can fetch this in one go (Fyers handles pagination usually, but let's stick to chunk loop for safety)
+        # Actually fetch_history takes start/end. Let's do a loop to be safe with large ranges.
+        
+        chunk_size = 1 if resolution == "1" else 30
+        loop_date = sync_start_date
+        total_added = 0
+        
+        while loop_date < effective_end:
+            # Handle standard chunking
+            chunk_end = min(loop_date + timedelta(days=chunk_size), effective_end)
+            
+            # Special logic: If chunk_end == loop_date (small diff), force at least some advance or break
+            if chunk_end <= loop_date: 
+                 chunk_end = loop_date + timedelta(days=1)
+
+            if resolution == "1":
+                print(f"      ⏳ {loop_date.date()}...", end="\r")
+
+            candles = fetch_history(fyers, symbol, loop_date, chunk_end, resolution)
+            
+            if candles:
+                df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['symbol'] = symbol
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                
+                rows_to_insert = []
+                for _, row in df.iterrows():
+                    rows_to_insert.append((
+                        row['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), 
+                        row['symbol'], 
+                        row['open'], row['high'], row['low'], row['close'], row['volume']
+                    ))
+
+                try:
+                    conn.executemany(f"INSERT OR IGNORE INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?)", rows_to_insert)
+                    total_added += len(rows_to_insert)
+                except Exception as e:
+                    print(f"   ⚠️ Insert Error: {e}")
+            
+            # Move Next
+            loop_date = chunk_end 
+            time.sleep(0.2 if resolution == "1" else 0.1) 
+    else:
+        print(f"      ✨ All data present and up-to-date. Skipping.") 
     
     if total_added > 0:
         print(f"   ✅ {symbol}: Added {total_added} new candles.")

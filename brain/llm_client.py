@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import logging
 from openai import OpenAI
 from dotenv import load_dotenv
 from brain.prompts import (
@@ -11,6 +12,9 @@ from brain.prompts import (
 
 load_dotenv()
 
+# Initialize Logger
+logger = logging.getLogger(__name__)
+
 class LLMClient:
     def __init__(self):
         # --- BRAIN CONFIG (Strategic / Qwen 14B) ---
@@ -19,11 +23,34 @@ class LLMClient:
         self.brain_model = os.getenv("BRAIN_MODEL_NAME", "Qwen/Qwen2.5-14B-Instruct-Q8")
         
         # Initialize Client
-        print(f"🧠 Brain Connecting to: {self.brain_model} at {self.brain_api_base}")
-        self.brain_client = OpenAI(base_url=self.brain_api_base, api_key=self.brain_api_key, timeout=90.0)
+        logger.info(f"🧠 Brain Connecting to: {self.brain_model} at {self.brain_api_base}")
+        self.brain_client = OpenAI(base_url=self.brain_api_base, api_key=self.brain_api_key, timeout=300.0)
+
+    def wait_for_model_ready(self):
+        """Blocks until the model responds effectively (handles lazy loading)"""
+        logger.info(f"⏳ Verification: Waiting for {self.brain_model} to load...")
+        max_retries = 20 # 20 * 5s = 100s (plus client timeout)
+        
+        for i in range(max_retries):
+            try:
+                # Simple ping
+                self.brain_client.chat.completions.create(
+                    model=self.brain_model,
+                    messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=1
+                )
+                logger.info("✅ Brain is ONLINE and READY.")
+                return True
+            except Exception as e:
+                logger.info(f"   💤 Waking up Brain... ({i+1}/{max_retries}) - {str(e)[:50]}...")
+                time.sleep(5)
+        
+        logger.error("❌ Brain Init Failed: Model did not load in time.")
+        return False
 
     def _query_model(self, system_msg, user_msg):
         """Generic wrapper"""
+        import traceback
         start = time.time()
         
         client = self.brain_client
@@ -33,7 +60,7 @@ class LLMClient:
 
         try:
             # Log System Prompt for visibility
-            print(f"\n--- {role_icon} {role_name} SYSTEM ---\n{system_msg}\n---")
+            logger.info(f"\n--- {role_icon} {role_name} SYSTEM ---\n{system_msg}\n---")
             
             response = client.chat.completions.create(
                 model=model,
@@ -90,7 +117,8 @@ class LLMClient:
             
             # Monitoring Log
             lat = (time.time() - start)
-            print(f"\n--- {role_icon} {role_name} OUTPUT ({lat:.2f}s) ---\n{content[:500]}...\n-----------------------")
+            # Log full content (up to 5000 chars) for debugging visibility
+            logger.info(f"\n--- {role_icon} {role_name} OUTPUT ({lat:.2f}s) ---\n{content[:5000]}\n-----------------------")
             
             # Try to parse JSON with error recovery
             try:
@@ -101,7 +129,7 @@ class LLMClient:
                     return None
 
                 # Try to find the position and truncate
-                print(f"      ⚠️ JSON parse error at position {e.pos}, attempting recovery...")
+                logger.warning(f"      ⚠️ JSON parse error at position {e.pos}, attempting recovery...")
                 
                 # RECOVERY STRATEGY:
                 # 1. Try to find the last '}' and hope for valid JSON before it
@@ -110,7 +138,7 @@ class LLMClient:
                     try:
                         potential = content[:last_brace_idx+1]
                         data = json.loads(potential)
-                        print(f"      ✅ JSON recovery successful (found last brace)")
+                        logger.info(f"      ✅ JSON recovery successful (found last brace)")
                         return data
                     except:
                         pass
@@ -130,14 +158,15 @@ class LLMClient:
                 
                 try:
                     data = json.loads(truncated)
-                    print(f"      ✅ JSON recovery successful (heuristic truncation)")
+                    logger.info(f"      ✅ JSON recovery successful (heuristic truncation)")
                 except:
-                    print(f"      ❌ JSON recovery failed, returning None")
+                    logger.error(f"      ❌ JSON recovery failed, returning None")
                     return None
             
             return data
         except Exception as e:
-            print(f"❌ {role_icon} {role_name} FAILURE: {e}")
+            traceback.print_exc()
+            logger.error(f"❌ {role_icon} {role_name} FAILURE: {e}")
             return None
 
     def get_morning_brief(self, context_data, current_tick=None, symbol="BANKNIFTY"):
@@ -202,6 +231,7 @@ class LLMClient:
         )
         
         print(f"\n--- 🧠 BRAIN INPUT (MORNING) ---\n{prompt}\n--------------------------------")
+        logger.info(f"\n--- 🧠 BRAIN INPUT (MORNING) ---\n{prompt}\n--------------------------------")
         
         # ROUTING: BRAIN with purpose-specific system prompt
         data = self._query_model(SYSTEM_PROMPT_MORNING, prompt)
@@ -213,12 +243,12 @@ class LLMClient:
             data['boundary_levels']['pivot_point'] = pivot
             data['boundary_levels']['support_zone'] = support
             data['boundary_levels']['resistance_zone'] = resistance
-            print(f"      📐 Pivot Levels: S={support:.1f} | P={pivot:.1f} | R={resistance:.1f}")
+            logger.info(f"      📐 Pivot Levels: S={support:.1f} | P={pivot:.1f} | R={resistance:.1f}")
             
             personality = data.get('market_personality', 'N/A')
             vix_regime = data.get('vix_regime', 'N/A')
             bias = data.get('primary_bias', 'N/A')
-            print(f"      🌅 {personality} | VIX:{vix_regime} | Bias:{bias}")
+            logger.info(f"      🌅 {personality} | VIX:{vix_regime} | Bias:{bias}")
             
         return data
 
@@ -333,7 +363,7 @@ class LLMClient:
             unrealized_pnl=f"{unrealized_pnl:.1f}"
         )
         
-        print(f"\n--- 👷 WORKER INPUT (TACTICAL) ---\n{prompt}\n--------------------------------")
+        logger.info(f"\n--- 👷 WORKER INPUT (TACTICAL) ---\n{prompt}\n--------------------------------")
         
         # ROUTING: BRAIN with purpose-specific system prompt (Was WORKER)
         data = self._query_model(SYSTEM_PROMPT_TACTICAL, prompt)
@@ -388,7 +418,7 @@ class LLMClient:
             
             # Log
             reason_short = reason[:40] + '...' if len(reason) > 40 else reason
-            print(f"      🔸 {action} | Entry:{entry:.1f} | SL:{data['sl']} (-{sl_points:.1f}) | TGT:{data['target']} (+{tgt_points:.1f}) | {reason_short}")
+            logger.info(f"      🔸 {action} | Entry:{entry:.1f} | SL:{data['sl']} (-{sl_points:.1f}) | TGT:{data['target']} (+{tgt_points:.1f}) | {reason_short}")
             
         return data
 
@@ -429,7 +459,7 @@ class LLMClient:
         
         # OPTION 3: VALIDATION & SELF-CORRECTION STEP
         if not data:
-            print("      🔄 Attempting SELF-CORRECTION for EOD Audit...")
+            logger.info("      🔄 Attempting SELF-CORRECTION for EOD Audit...")
             # Get the raw response if possible (we need to bypass slightly to get bad content)
             # Since we can't easily get raw from _query_model if it failed, we'll trigger a 'Clean-up' call
             # using a more aggressive 'Fixer' instructions
@@ -445,7 +475,7 @@ class LLMClient:
             
         nugget = data.get('dataset_nugget', data.get('nugget_good', 'N/A'))
         audit_summary = f"PnL:{total_pnl:.1f} | {data.get('bias_efficiency', 'N/A')} | Nugget:{nugget}"
-        print(f"      📊 EOD: {audit_summary}")
+        logger.info(f"      📊 EOD: {audit_summary}")
         
         # Inject summary into data for the caller
         data['audit_summary'] = audit_summary

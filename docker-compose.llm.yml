@@ -21,13 +21,13 @@ services:
     environment:
       - REDIS_HOST=beast_redis
       - REDIS_PORT=6379
-      - VLLM_API_BASE=http://host.docker.internal:8000/v1
-      - BRAIN_API_BASE=http://host.docker.internal:8000/v1
-      - BRAIN_API_KEY=EMPTY
-      - BRAIN_MODEL_NAME=/root/.cache/huggingface/hub/Qwen3-30B-A3B-Instruct-AWQ
-      - WORKER_API_BASE=http://host.docker.internal:8000/v1
-      - WORKER_API_KEY=EMPTY
-      - WORKER_MODEL_NAME=/root/.cache/huggingface/hub/Qwen3-30B-A3B-Instruct-AWQ
+      - VLLM_API_BASE=http://ai_core_ollama:11434/v1
+      - BRAIN_API_BASE=http://ai_core_ollama:11434/v1
+      - BRAIN_API_KEY=ollama
+      - BRAIN_MODEL_NAME=nemotron-30b
+      - WORKER_API_BASE=http://ai_core_ollama:11434/v1
+      - WORKER_API_KEY=ollama
+      - WORKER_MODEL_NAME=nemotron-30b
       - FYERS_CLIENT_ID=${FYERS_CLIENT_ID}
       - FYERS_SECRET_ID=${FYERS_SECRET_ID}
       - TRADING_MODE=PAPER
@@ -44,6 +44,7 @@ services:
         condition: service_healthy
     networks:
       - beast_net
+      - ai_core_net
 
   beast-producer:
     build: .
@@ -63,3 +64,6 @@ services:
 networks:
   beast_net:
     driver: bridge
+  ai_core_net:
+    name: ai-core_default
+    external: true

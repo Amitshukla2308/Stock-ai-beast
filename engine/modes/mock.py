@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 
 IST = pytz.timezone('Asia/Kolkata')
 load_dotenv()
+import logging
+logger = logging.getLogger(__name__)
 
 def safe_float(val):
     try: return float(val)
@@ -23,6 +25,7 @@ class MockMode(BaseMode):
     def __init__(self, debug_schedule=False, symbol="BANKNIFTY"):
         self.debug_schedule = debug_schedule
         self.symbol = symbol
+        self.mode_tag = "MOCK"
         
         # Components
         self.brain = LLMClient()
@@ -41,7 +44,7 @@ class MockMode(BaseMode):
         self.running = False
 
     def start(self):
-        print("🎭 Starting MOCK Mode (Live Data + Paper Money)")
+        logger.info("🎭 Starting MOCK Mode (Live Data + Paper Money)")
         self.running = True
         self.scheduler.start()
         
@@ -84,7 +87,9 @@ class MockMode(BaseMode):
         if time_since_hb >= 5:
             instr = self.hot_path.active_instructions.get('action', 'WAIT')
             entry = self.hot_path.active_instructions.get('entry_price', 'N/A')
-            print(f"   [{ts.strftime('%H:%M')}] 💓 Monitor: Price {tick['close']:.1f} | Instr: {instr} ({entry})")
+            instr = self.hot_path.active_instructions.get('action', 'WAIT')
+            entry = self.hot_path.active_instructions.get('entry_price', 'N/A')
+            logger.info(f"   [{ts.strftime('%H:%M')}] 💓 Monitor: Price {tick['close']:.1f} | Instr: {instr} ({entry})")
             self.last_heartbeat_time = ts
 
         if self.hot_path.trades:
@@ -101,7 +106,7 @@ class MockMode(BaseMode):
                   else:
                         symbol = trade.get('symbol', 'UNKNOWN')
 
-                  print(f"   😶 MOCK ORDER: {action} {symbol} @ {tick['close']:.1f}")
+                  logger.info(f"   😶 MOCK ORDER: {action} {symbol} @ {tick['close']:.1f}")
                   
                   # Update Internal Ledger
                   self.portfolio.process_fill(
@@ -117,6 +122,17 @@ class MockMode(BaseMode):
                   # Log only full trades to Journal
                   if not is_entry:
                       self.journal.log_trade(trade)
+
+                      # TELEGRAM NOTIFICATION (Trade Closed)
+                      self._emit_telegram_event("TRADE", {
+                          "date": tick['timestamp'].strftime('%Y-%m-%d'),
+                          "side": trade.get('side'),
+                          "entry": trade.get('entry_price'),
+                          "exit": trade.get('exit_price'),
+                          "pnl": trade.get('pnl'),
+                          "reason": trade.get('reason'),
+                          "balance": 0 # Mock doesn't track balance in same way or needs portfolio update
+                      }, mode_tag=self.mode_tag)
                       
              self.hot_path.trades = []
 
@@ -138,7 +154,9 @@ class MockMode(BaseMode):
         
         if self.last_morning_date == sim_time.date(): return
         
-        print(f"   [{sim_time.strftime('%H:%M')}] 🧠 Morning Briefing...")
+        if self.last_morning_date == sim_time.date(): return
+        
+        logger.info(f"   [{sim_time.strftime('%H:%M')}] 🧠 Morning Briefing...")
         context = fetch_context_data(sim_time, symbol=self.symbol)
         
         # Slicing Optimization
@@ -146,11 +164,20 @@ class MockMode(BaseMode):
         mb_context['last_15min'] = context['last_15min'][-3:]
         mb_context['today_5min'] = context['today_5min'][-3:]
         
+        
         brief = self.brain.get_morning_brief(mb_context, current_tick=self.last_tick, symbol=self.symbol)
-        print(f"      📝 Plan: {brief.get('reasoning')}")
+        logger.info(f"      📝 Plan: {brief.get('reasoning')}")
         self.morning_brief = brief
         self.last_morning_date = sim_time.date()
         self.journal.log_event(sim_time, "MORNING", brief)
+        
+        # TELEGRAM NOTIFICATION
+        self._emit_telegram_event("MORNING_BRIEF", {
+            "date": sim_time.strftime('%Y-%m-%d'),
+            "personality": brief.get('market_personality'),
+            "bias": brief.get('primary_bias'),
+            "plan": brief.get('morning_logic', brief.get('reasoning'))
+        }, mode_tag=self.mode_tag)
 
     def trigger_tactical_update(self):
         if not self.last_tick: return
@@ -218,6 +245,16 @@ class MockMode(BaseMode):
             
         print(f"      📊 {summary}")
         self.journal.log_event(datetime.now(IST), "EOD_AUDIT", audit_res)
+
+        # TELEGRAM NOTIFICATION
+        self._emit_telegram_event("EOD", {
+            "date": sid,
+            "summary": summary,
+            "total_pnl": sum(t.get('pnl', 0) for t in day_trades if t.get('pnl') is not None),
+            "trades": len(day_trades),
+            "win_rate": (len([t for t in day_trades if t.get('pnl', 0) > 0]) / len(day_trades) * 100) if day_trades else 0,
+            "nugget": audit_res.get('dataset_nugget', audit_res.get('nugget_good', 'N/A'))
+        }, mode_tag=self.mode_tag)
 
         # OPTIONAL: Save Experience for RAG/RL (Mirroring backtest)
         from data.database import save_experience
