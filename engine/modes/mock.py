@@ -22,7 +22,8 @@ def safe_float(val):
     except: return 0.0
 
 class MockMode(BaseMode):
-    def __init__(self, debug_schedule=False, symbol="BANKNIFTY"):
+    def __init__(self, debug_schedule=False, symbol="BANKNIFTY", chat_id=None):
+        self.chat_id = chat_id
         self.debug_schedule = debug_schedule
         self.symbol = symbol
         self.mode_tag = "MOCK"

@@ -7,8 +7,8 @@ class LiveMode(MockMode):
     Inherits from MockMode because logic is identical 
     EXCEPT for Execution (on_tick trade handling).
     """
-    def __init__(self, debug_schedule=False, symbol="BANKNIFTY"):
-        super().__init__(debug_schedule, symbol=symbol)
+    def __init__(self, debug_schedule=False, symbol="BANKNIFTY", chat_id=None):
+        super().__init__(debug_schedule, symbol=symbol, chat_id=chat_id)
         self.mode_tag = "LIVE"
         
         # Initialize Broker

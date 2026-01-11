@@ -65,6 +65,11 @@ class HotPathExecutor:
         self.prev_vix = None
         self.current_vix = None
     
+    def _round_to_tick(self, price, tick=0.05):
+        """Round price to nearest tick size (default 0.05 for NSE)"""
+        if price is None: return None
+        return round(round(price / tick) * tick, 2)
+    
     def _update_momentum_state(self, tick, timestamp):
         """Track intraday momentum for exhaustion detection"""
         from datetime import datetime
@@ -208,9 +213,9 @@ class HotPathExecutor:
             if not llm_sl:
                 default_sl_dist = 30  # Fixed 30 pt fallback
                 if action == "BUY_CALL":
-                    instructions['sl'] = round(entry - default_sl_dist, 1)
+                    instructions['sl'] = self._round_to_tick(entry - default_sl_dist)
                 else:
-                    instructions['sl'] = round(entry + default_sl_dist, 1)
+                    instructions['sl'] = self._round_to_tick(entry + default_sl_dist)
                 print(f"      ⚠️ No SL from LLM - using fallback: {instructions['sl']}")
             else:
                 sl_dist = abs(entry - llm_sl)
@@ -218,35 +223,35 @@ class HotPathExecutor:
                 # MINIMUM SL floor: 15 pts
                 if sl_dist < 15:
                     if action == "BUY_CALL":
-                        instructions['sl'] = round(entry - 15, 1)
+                        instructions['sl'] = self._round_to_tick(entry - 15)
                     else:
-                        instructions['sl'] = round(entry + 15, 1)
+                        instructions['sl'] = self._round_to_tick(entry + 15)
                     print(f"      ⚠️ SL too tight ({sl_dist:.0f}pts) - capped to 15pts: {instructions['sl']}")
                 
                 # MAXIMUM SL cap: 50 pts (prevents huge losses like -113 pts!)
                 elif sl_dist > 50:
                     if action == "BUY_CALL":
-                        instructions['sl'] = round(entry - 50, 1)
+                        instructions['sl'] = self._round_to_tick(entry - 50)
                     else:
-                        instructions['sl'] = round(entry + 50, 1)
+                        instructions['sl'] = self._round_to_tick(entry + 50)
                     print(f"      ⚠️ SL too wide ({sl_dist:.0f}pts) - capped to 50pts: {instructions['sl']}")
             
             # CRITICAL: Create fallback Target if LLM didn't provide one
             if not llm_target:
                 default_target_dist = 60  # Fixed 60 pt fallback (2x SL)
                 if action == "BUY_CALL":
-                    instructions['target'] = round(entry + default_target_dist, 1)
+                    instructions['target'] = self._round_to_tick(entry + default_target_dist)
                 else:
-                    instructions['target'] = round(entry - default_target_dist, 1)
+                    instructions['target'] = self._round_to_tick(entry - default_target_dist)
                 print(f"      ⚠️ No Target from LLM - using fallback: {instructions['target']}")
             else:
                 # Apply minimum Target floor of 30 pts
                 target_dist = abs(entry - llm_target)
                 if target_dist < 30:
                     if action == "BUY_CALL":
-                        instructions['target'] = round(entry + 30, 1)
+                        instructions['target'] = self._round_to_tick(entry + 30)
                     else:
-                        instructions['target'] = round(entry - 30, 1)
+                        instructions['target'] = self._round_to_tick(entry - 30)
             
             # 4.1 TARGET LEVEL ADJUSTMENT: Cap target to respect S/P/R levels
             # If a level blocks target path, cap to 15pts before that level
@@ -312,11 +317,11 @@ class HotPathExecutor:
                         print("      ⚠️ SCALPING: No entry price, skipping")
                         return
                     if action == "BUY_CALL":
-                        instructions['target'] = round(entry + 30, 1)
-                        instructions['sl'] = round(entry - 15, 1)
+                        instructions['target'] = self._round_to_tick(entry + 30)
+                        instructions['sl'] = self._round_to_tick(entry - 15)
                     else:
-                        instructions['target'] = round(entry - 30, 1)
-                        instructions['sl'] = round(entry + 15, 1)
+                        instructions['target'] = self._round_to_tick(entry - 30)
+                        instructions['sl'] = self._round_to_tick(entry + 15)
                     instructions['max_hold_minutes'] = 15
                 
                 elif entry_location == 'SUBOPTIMAL' or final_confidence < 0.60:
@@ -383,11 +388,11 @@ class HotPathExecutor:
                 if new_sl and current_sl:
                     # Validate: CALL SL can only go UP, PUT SL can only go DOWN
                     if pos_side == 'CALL' and new_sl > current_sl:
-                        pos['sl'] = new_sl
+                        pos['sl'] = self._round_to_tick(new_sl)
                         reason_text = self.active_instructions.get('adjustment_reason', 'AI trail')
                         print(f"      🧠 AI TRAIL SL: {pos['sl']:.1f} ({reason_text})")
                     elif pos_side == 'PUT' and new_sl < current_sl:
-                        pos['sl'] = new_sl
+                        pos['sl'] = self._round_to_tick(new_sl)
                         reason_text = self.active_instructions.get('adjustment_reason', 'AI trail')
                         print(f"      🧠 AI TRAIL SL: {pos['sl']:.1f} ({reason_text})")
             
@@ -395,7 +400,7 @@ class HotPathExecutor:
             if ai_action == Action.ADJUST_TARGET.value:
                 new_target = self.active_instructions.get('adjusted_target')
                 if new_target:
-                    pos['target'] = new_target
+                    pos['target'] = self._round_to_tick(new_target)
                     reason_text = self.active_instructions.get('adjustment_reason', 'AI target adjust')
                     print(f"      🧠 AI ADJUST TARGET: {pos['target']:.1f} ({reason_text})")
 
@@ -564,17 +569,17 @@ class HotPathExecutor:
             if pos['side'] == 'CALL':
                 new_sl = entry_price + locked_profit
                 if sl is None or new_sl > sl:
-                    pos['sl'] = new_sl
+                    pos['sl'] = self._round_to_tick(new_sl)
                     pos['sl_adjusted'] = True
-                    sl = new_sl
-                    print(f"      🔒 60% REACHED → SL to +{locked_profit}pts (SL→{new_sl:.1f})")
+                    sl = pos['sl']
+                    print(f"      🔒 60% REACHED → SL to +{locked_profit}pts (SL→{sl:.1f})")
             else:  # PUT
                 new_sl = entry_price - locked_profit
                 if sl is None or new_sl < sl:
-                    pos['sl'] = new_sl
+                    pos['sl'] = self._round_to_tick(new_sl)
                     pos['sl_adjusted'] = True
-                    sl = new_sl
-                    print(f"      🔒 60% REACHED → SL to +{locked_profit}pts (SL→{new_sl:.1f})")
+                    sl = pos['sl']
+                    print(f"      🔒 60% REACHED → SL to +{locked_profit}pts (SL→{sl:.1f})")
         
         # Log position status every candle
         pnl_color = "🟢" if unrealized_pnl >= 0 else "🔴"

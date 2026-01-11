@@ -82,17 +82,17 @@ def get_engine(mode, args=None):
             raise e # CRITICAL: Stop execution if prefill fails
         
         balance = args.balance if args and hasattr(args, 'balance') else 30000
-        return BacktestMode(start_date=start_date, end_date=end_date, symbol=symbol, initial_balance=balance)
+        return BacktestMode(start_date=start_date, end_date=end_date, symbol=symbol, initial_balance=balance, chat_id=args.chat_id)
         
     elif mode == 'mock':
         debug = args.debug_schedule if args else False
         symbol = args.symbol if args else "NIFTY"
-        return MockMode(debug_schedule=debug, symbol=symbol)
+        return MockMode(debug_schedule=debug, symbol=symbol, chat_id=args.chat_id)
         
     elif mode == 'live':
         debug = args.debug_schedule if args else False
         symbol = args.symbol if args else "NIFTY"
-        return LiveMode(debug_schedule=debug, symbol=symbol)
+        return LiveMode(debug_schedule=debug, symbol=symbol, chat_id=args.chat_id)
         
     else:
         raise ValueError(f"Unknown mode: {mode}")
@@ -105,6 +105,7 @@ if __name__ == "__main__":
     parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD)")
     parser.add_argument("--symbol", type=str, default="NIFTY", help="Ticker symbol (e.g. NIFTY, BANKNIFTY)")
     parser.add_argument("--balance", type=int, default=30000, help="Starting balance in rupees")
+    parser.add_argument("--chat-id", type=str, default=None, help="Telegram Chat ID for notifications")
     parser.add_argument("--debug-schedule", action="store_true", help="Fast schedule for debugging")
     
     args = parser.parse_args()

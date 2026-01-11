@@ -60,7 +60,8 @@ class BalanceMonitor:
         }
 
 class BacktestMode(BaseMode):
-    def __init__(self, start_date, end_date, symbol="NIFTY", initial_balance=30000):
+    def __init__(self, start_date, end_date, symbol="NIFTY", initial_balance=30000, chat_id=None):
+        self.chat_id = chat_id
         self.start_date = start_date
         self.end_date = end_date
         self.symbol = symbol
@@ -402,7 +403,7 @@ class BacktestMode(BaseMode):
                  if trade.get('type') == 'EXIT':
                      self.journal.log_trade(trade)
                      
-                     # TELEGRAM NOTIFICATION
+                     # TELEGRAM NOTIFICATION (EXIT)
                      self._emit_telegram_event("TRADE", {
                          "date": tick['timestamp'].strftime('%Y-%m-%d'),
                          "side": trade.get('side'),
@@ -410,6 +411,17 @@ class BacktestMode(BaseMode):
                          "exit": trade.get('exit_price'),
                          "pnl": trade.get('pnl'),
                          "reason": trade.get('reason'),
+                         "balance": self.balance_monitor.current_balance
+                     }, mode_tag="BACKTEST")
+                 
+                 elif trade.get('type') == 'ENTRY':
+                     # TELEGRAM NOTIFICATION (ENTRY)
+                     self._emit_telegram_event("ENTRY", {
+                         "date": tick['timestamp'].strftime('%Y-%m-%d'),
+                         "side": trade.get('side'),
+                         "entry": trade.get('entry_price'),
+                         "sl": trade.get('sl'),
+                         "target": trade.get('target'),
                          "balance": self.balance_monitor.current_balance
                      }, mode_tag="BACKTEST")
              self.hot_path.trades = [] # Clear buffer
