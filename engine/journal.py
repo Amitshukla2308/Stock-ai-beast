@@ -98,7 +98,8 @@ class Journal:
         conn = get_connection()
         import json
         if isinstance(content, dict):
-            content = json.dumps(content)
+            # Use default=str to handle non-serializable objects (time, datetime, etc.)
+            content = json.dumps(content, default=str)
         
         conn.execute("""
             INSERT INTO simulation_logs (session_id, timestamp, event_type, content) 

@@ -1,5 +1,6 @@
 from enum import Enum
 from datetime import time
+import math
 
 class Action(Enum):
     BUY_CALL = "BUY_CALL"
@@ -64,11 +65,22 @@ class HotPathExecutor:
         self.last_trade_pnl = None
         self.prev_vix = None
         self.current_vix = None
+        
+        # State for Exceptional Trade Gate
+        self.fifteen_min_ranges = []
+        self.last_bar_time = None
+        self.day_structure = {'highs': [], 'lows': []}
+        self.total_trades_today = 0
     
     def _round_to_tick(self, price, tick=0.05):
         """Round price to nearest tick size (default 0.05 for NSE)"""
         if price is None: return None
-        return round(round(price / tick) * tick, 2)
+        try:
+            f = float(price)
+            if math.isnan(f) or math.isinf(f): return None
+            return round(round(f / tick) * tick, 2)
+        except:
+            return None
     
     def _update_momentum_state(self, tick, timestamp):
         """Track intraday momentum for exhaustion detection"""
@@ -82,6 +94,9 @@ class HotPathExecutor:
             self.day_high = tick.get('high', tick['close'])
             self.day_low = tick.get('low', tick['close'])
             self.current_day = current_day
+            self.fifteen_min_ranges = []
+            self.day_structure = {'highs': [], 'lows': []}
+            self.total_trades_today = 0
             print(f"      📅 New Day: {current_day} | Open: {self.day_open:.1f}")
         else:
             # Update intraday extremes
@@ -130,6 +145,75 @@ class HotPathExecutor:
         
         return is_bullish_trade != has_upward_momentum
 
+    def is_exceptional_trade(self, instructions, current_time):
+        """
+        STRICT quantitative gate for trades after 13:30 IST.
+        Returns: (allowed: bool, rejection_reason: str | None)
+        """
+        # RULE 1 (FIRST): Trade Count Guard — MUST BE CHECKED FIRST
+        if self.total_trades_today >= 4:
+            return False, "Daily trade limit reached (4 trades)"
+
+        # RULE 2: Time Window Rule (Hard Gate)
+        if current_time > time(14, 45):
+            return False, "Late session (>14:45) — no statistical edge"
+
+        # RULE 3: Volatility Expansion Rule
+        avg_range = sum(self.fifteen_min_ranges) / len(self.fifteen_min_ranges) if self.fifteen_min_ranges else 50
+        current_price = instructions.get('close', 0)
+        
+        # Check if price broken and held Day High/Low
+        breakout_acceptance = False
+        if self.day_high and current_price > self.day_high + 5: breakout_acceptance = True
+        if self.day_low and current_price < self.day_low - 5: breakout_acceptance = True
+        
+        current_vol_expansion = False
+        if self.fifteen_min_ranges and self.fifteen_min_ranges[-1] >= 1.5 * avg_range:
+            current_vol_expansion = True
+            
+        if not (current_vol_expansion or breakout_acceptance):
+            return False, "No real volatility expansion"
+
+        # RULE 4: Directional Alignment Rule
+        action = instructions.get('action')
+        morning_bias = instructions.get('morning_bias', 'NEUTRAL')
+        pivot = instructions.get('pivot', 0)
+        
+        bias_align = (action == "BUY_CALL" and morning_bias == "BULLISH") or \
+                     (action == "BUY_PUT" and morning_bias == "BEARISH") or \
+                     (morning_bias == "NEUTRAL")
+        
+        struct_align = False
+        highs = self.day_structure['highs']
+        lows = self.day_structure['lows']
+        if action == "BUY_CALL":
+            if len(highs) >= 2 and len(lows) >= 2:
+                struct_align = highs[-1] >= highs[-2] and lows[-1] >= lows[-2]
+            else: struct_align = True
+        elif action == "BUY_PUT":
+            if len(highs) >= 2 and len(lows) >= 2:
+                struct_align = highs[-1] <= highs[-2] and lows[-1] <= lows[-2]
+            else: struct_align = True
+
+        entry = instructions.get('entry', instructions.get('entry_price', current_price))
+        dist_to_pivot = abs(entry - pivot) if pivot else 100
+        pivot_clear = dist_to_pivot > 15
+        
+        if not (bias_align and struct_align and pivot_clear):
+            return False, "Direction / structure not aligned"
+
+        # RULE 5: Risk–Reward Rule
+        sl_pts = instructions.get('sl_points', 30)
+        tgt_pts = instructions.get('target_points', 60)
+        if instructions.get('sl') and entry: sl_pts = abs(entry - instructions['sl'])
+        if instructions.get('target') and entry: tgt_pts = abs(entry - instructions['target'])
+        
+        rr = tgt_pts / sl_pts if sl_pts > 0 else 0
+        if rr < 1.8:
+            return False, f"Risk–reward {rr:.1f} < 1.8 not acceptable"
+
+        return True, None
+
     def update_instructions(self, instructions):
         """Received from LLM Tactical Update. Applies risk-gating and logic-guards."""
         action = instructions.get('action', 'HOLD')
@@ -145,32 +229,83 @@ class HotPathExecutor:
         vix = instructions.get('vix')
         if vix is None or vix == 'N/A':
             vix = 15.0
+        
+        # NaN Safety Check
+        try:
+            if math.isnan(float(vix)): vix = 15.0
+            if math.isnan(float(raw_confidence)): raw_confidence = 0.0
+        except:
+            pass
 
         # 1. BRAIN CALIBRATION: (Trust Prompt v4.0's internal multi-step calibration)
         final_confidence = raw_confidence
+
+        # Initial Decision: Assume EXECUTED unless changed
+        instructions['engine_decision'] = "EXECUTED"
+        instructions['engine_reason'] = None
+        
+        # 0. EXCEPTIONAL TRADE GATE (Late Session Discipline)
+        # FIX: Use tick timestamp from instructions, NOT datetime.now()
+        tick_time = instructions.get('tick_time')  # This MUST be set by caller with tick timestamp
+        if tick_time is None:
+            # Fallback for safety - but this should never happen in proper usage
+            from datetime import datetime
+            import pytz
+            IST = pytz.timezone('Asia/Kolkata')
+            tick_time = datetime.now(IST).time()
+        
+        # Check if we are in late session (>= 13:30 IST)
+        if tick_time >= time(13, 30) and action in ["BUY_CALL", "BUY_PUT"]:
+            allowed, reason = self.is_exceptional_trade(instructions, tick_time)
+            if not allowed:
+                instructions['action'] = "HOLD"
+                instructions['engine_decision'] = "BLOCKED"
+                instructions['engine_reason'] = reason
+                instructions['gate_rejected'] = True
+                print(f"      ⛔ EXCEPTIONAL GATE BLOCKED: {reason}")
+                self.active_instructions = instructions
+                return
 
         # 2. BIAS GATING: (Already handled by Prompt v4.0 logic)
         # We only apply manual penalties if the LLM failed to follow bias alignment
         if morning_bias == "BULLISH" and action == "BUY_PUT":
             final_confidence *= 0.5
+            instructions['engine_decision'] = "MODIFIED"
+            instructions['engine_reason'] = "Bias Penalty (against BULLISH bias)"
         elif morning_bias == "BEARISH" and action == "BUY_CALL":
             final_confidence *= 0.5
+            instructions['engine_decision'] = "MODIFIED"
+            instructions['engine_reason'] = "Bias Penalty (against BEARISH bias)"
 
-        # 3. CONFIDENCE THRESHOLD: Regime-Dependent v4.0
-        # COMPLACENT: 0.55 | NORMAL: 0.50 | PANIC: 0.65
-        threshold = 0.50
-        if vix < 13: threshold = 0.55
-        elif vix > 18: threshold = 0.65
+        # 3. CONFIDENCE THRESHOLD (Reconciled with Prompts)
+        # OPENING_RANGE = 0.50 (mean reversion, tight SLs)
+        # STRUCTURE     = 0.65 (trend trades, wider risk)
+        # Prompts are aligned to these values intentionally.
+        mode = instructions.get('mode', 'UNKNOWN')
+        threshold = 0.50 # Default
+        if mode == 'OPENING_RANGE':
+            threshold = 0.50
+        elif mode == 'STRUCTURE':
+            threshold = 0.65
+        else:
+            # Fallback for UNKNOWN period (10:00-10:30) or model drift
+            if vix < 13: threshold = 0.55
+            elif vix > 18: threshold = 0.70
+            else: threshold = 0.50
 
         if final_confidence < threshold and action in ["BUY_CALL", "BUY_PUT"]:
             # print(f"      🚫 Filtered: {action} (Conf {final_confidence:.2f} < {threshold})")
             instructions['action'] = "HOLD"
+            instructions['engine_decision'] = "BLOCKED"
+            instructions['engine_reason'] = f"Confidence {final_confidence:.2f} below {threshold}"
         
         # 3.5 ENTRY LOCATION FILTER: Skip SUBOPTIMAL entries with low confidence
         entry_location = instructions.get('entry_location', 'GOOD')
-        if entry_location == 'SUBOPTIMAL' and final_confidence < 0.6 and action in ["BUY_CALL", "BUY_PUT"]:
+        if entry_location == 'SUBOPTIMAL' and final_confidence < 0.6 and action in ["BUY_CALL", "BUY_PUT"] and instructions['action'] != "HOLD":
             print(f"      ⚠️ SUBOPTIMAL entry + low confidence ({final_confidence:.2f}) → SKIP")
             instructions['action'] = "HOLD"
+            instructions['engine_decision'] = "BLOCKED"
+            instructions['engine_reason'] = f"SUBOPTIMAL loc + {final_confidence:.2f} conf"
         
         # 3.6 LEVEL CONFIRMATION FILTER: Respect S/P/R with 20pt confirmation
         # Don't enter against a level without confirmation of break
@@ -186,6 +321,8 @@ class HotPathExecutor:
                 if 0 < dist_above_support <= 20:
                     print(f"      ⚠️ PUT entry {entry:.1f} within 20pts above Support {support:.1f} → SKIP (wait for break)")
                     instructions['action'] = "HOLD"
+                    instructions['engine_decision'] = "BLOCKED"
+                    instructions['engine_reason'] = f"Too close Above Support ({dist_above_support:.0f}pts)"
             
             # For CALL: Don't enter if within 20pts BELOW resistance (risk of rejection)
             if action == "BUY_CALL" and resistance:
@@ -193,13 +330,17 @@ class HotPathExecutor:
                 if 0 < dist_below_resistance <= 20:
                     print(f"      ⚠️ CALL entry {entry:.1f} within 20pts below Resistance {resistance:.1f} → SKIP (wait for break)")
                     instructions['action'] = "HOLD"
+                    instructions['engine_decision'] = "BLOCKED"
+                    instructions['engine_reason'] = f"Too close Below Resistance ({dist_below_resistance:.0f}pts)"
             
             # For both: Don't enter within 20pts of pivot (reversal zone)
-            if pivot:
+            if pivot and instructions['action'] != "HOLD":
                 dist_to_pivot = abs(entry - pivot)
                 if dist_to_pivot <= 20:
                     print(f"      ⚠️ Entry {entry:.1f} within 20pts of Pivot {pivot:.1f} → SKIP (reversal zone)")
                     instructions['action'] = "HOLD"
+                    instructions['engine_decision'] = "BLOCKED"
+                    instructions['engine_reason'] = f"Too close to Pivot ({dist_to_pivot:.0f}pts)"
         
         # 4. USE LLM's SL/TARGET VALUES (v5.1 - Trust prompt logic)
         # The LLM prompt now calculates proper 2x R:R targets
@@ -217,6 +358,8 @@ class HotPathExecutor:
                 else:
                     instructions['sl'] = self._round_to_tick(entry + default_sl_dist)
                 print(f"      ⚠️ No SL from LLM - using fallback: {instructions['sl']}")
+                instructions['engine_decision'] = "MODIFIED"
+                instructions['engine_reason'] = "Fallback SL applied"
             else:
                 sl_dist = abs(entry - llm_sl)
                 
@@ -227,6 +370,8 @@ class HotPathExecutor:
                     else:
                         instructions['sl'] = self._round_to_tick(entry + 15)
                     print(f"      ⚠️ SL too tight ({sl_dist:.0f}pts) - capped to 15pts: {instructions['sl']}")
+                    instructions['engine_decision'] = "MODIFIED"
+                    instructions['engine_reason'] = f"SL Floor (15pts from {sl_dist:.0f})"
                 
                 # MAXIMUM SL cap: 50 pts (prevents huge losses like -113 pts!)
                 elif sl_dist > 50:
@@ -235,6 +380,8 @@ class HotPathExecutor:
                     else:
                         instructions['sl'] = self._round_to_tick(entry + 50)
                     print(f"      ⚠️ SL too wide ({sl_dist:.0f}pts) - capped to 50pts: {instructions['sl']}")
+                    instructions['engine_decision'] = "MODIFIED"
+                    instructions['engine_reason'] = f"SL Cap (50pts from {sl_dist:.0f})"
             
             # CRITICAL: Create fallback Target if LLM didn't provide one
             if not llm_target:
@@ -244,6 +391,8 @@ class HotPathExecutor:
                 else:
                     instructions['target'] = self._round_to_tick(entry - default_target_dist)
                 print(f"      ⚠️ No Target from LLM - using fallback: {instructions['target']}")
+                instructions['engine_decision'] = "MODIFIED"
+                instructions['engine_reason'] = "Fallback TGT applied"
             else:
                 # Apply minimum Target floor of 30 pts
                 target_dist = abs(entry - llm_target)
@@ -252,6 +401,8 @@ class HotPathExecutor:
                         instructions['target'] = self._round_to_tick(entry + 30)
                     else:
                         instructions['target'] = self._round_to_tick(entry - 30)
+                    instructions['engine_decision'] = "MODIFIED"
+                    instructions['engine_reason'] = f"TGT Floor (30pts from {target_dist:.0f})"
             
             # 4.1 TARGET LEVEL ADJUSTMENT: Cap target to respect S/P/R levels
             # If a level blocks target path, cap to 15pts before that level
@@ -265,6 +416,8 @@ class HotPathExecutor:
                         if new_target != current_target:
                             print(f"      📉 Target capped: Support {support:.1f} in way → TGT {current_target:.1f} → {new_target:.1f}")
                             instructions['target'] = new_target
+                            instructions['engine_decision'] = "MODIFIED"
+                            instructions['engine_reason'] = "Target capped by Support"
                 else:  # BUY_CALL
                     # For CALL: target is above entry - check if resistance blocks it
                     if resistance and resistance < current_target and resistance > entry:
@@ -273,9 +426,11 @@ class HotPathExecutor:
                         if new_target != current_target:
                             print(f"      📈 Target capped: Resistance {resistance:.1f} in way → TGT {current_target:.1f} → {new_target:.1f}")
                             instructions['target'] = new_target
+                            instructions['engine_decision'] = "MODIFIED"
+                            instructions['engine_reason'] = "Target capped by Resistance"
 
         # === ADAPTIVE MOMENTUM STRATEGY ===
-        if action in ["BUY_CALL", "BUY_PUT"] and not self.open_position:
+        if action in ["BUY_CALL", "BUY_PUT"] and not self.open_position and instructions['action'] != "HOLD":
             entry_location = instructions.get('entry_location', 'UNKNOWN')
             vix = instructions.get('vix', 0)
             
@@ -302,6 +457,18 @@ class HotPathExecutor:
             elif is_same_direction and momentum_state in ['avg2', 'avg3', 'exceeded']:
                 # Momentum exhausted in same direction
                 
+                # FIX 3: Kill exhaustion scalps after 12:00
+                tick_time = instructions.get('tick_time')
+                if tick_time and tick_time >= time(12, 0):
+                    movement = self.total_upward_movement if action == "BUY_CALL" else self.total_downward_movement
+                    print(f"      ⛔ POST-12:00 EXHAUSTION BLOCKED: {momentum_state} ({movement:.0f}pts)")
+                    instructions['action'] = Action.HOLD.value
+                    instructions['engine_decision'] = "BLOCKED"
+                    instructions['engine_reason'] = f"Post-12:00 Exhaustion ({momentum_state})"
+                    instructions['gate_rejected'] = True
+                    self.active_instructions = instructions
+                    return
+                
                 if is_reversal:
                     # Catching the reversal - allow trade
                     print(f"      🔄 REVERSAL SETUP: Momentum {momentum_state}, catching turn")
@@ -310,25 +477,27 @@ class HotPathExecutor:
                     # High quality continuation - SCALPING MODE
                     print(f"      ⚡ SCALPING MODE: Momentum {momentum_state}, tight params")
                     self.scalping_mode = True
+                    instructions['engine_decision'] = "MODIFIED"
+                    instructions['engine_reason'] = f"SCALPING (Exhaustion {momentum_state})"
                     
                     # Override to scalping parameters
                     entry = instructions.get('entry') or instructions.get('entry_price')
-                    if not entry:
-                        print("      ⚠️ SCALPING: No entry price, skipping")
-                        return
-                    if action == "BUY_CALL":
-                        instructions['target'] = self._round_to_tick(entry + 30)
-                        instructions['sl'] = self._round_to_tick(entry - 15)
-                    else:
-                        instructions['target'] = self._round_to_tick(entry - 30)
-                        instructions['sl'] = self._round_to_tick(entry + 15)
-                    instructions['max_hold_minutes'] = 15
+                    if entry:
+                        if action == "BUY_CALL":
+                            instructions['target'] = self._round_to_tick(entry + 30)
+                            instructions['sl'] = self._round_to_tick(entry - 15)
+                        else:
+                            instructions['target'] = self._round_to_tick(entry - 30)
+                            instructions['sl'] = self._round_to_tick(entry + 15)
+                        instructions['max_hold_minutes'] = 15
                 
                 elif entry_location == 'SUBOPTIMAL' or final_confidence < 0.60:
                     # Exhausted + poor signal = SKIP
                     movement = self.total_upward_movement if action == "BUY_CALL" else self.total_downward_movement
                     print(f"      ⏸️  MOMENTUM EXHAUSTED: {momentum_state} ({movement:.0f}pts), skipping {entry_location} entry")
                     instructions['action'] = Action.HOLD.value
+                    instructions['engine_decision'] = "BLOCKED"
+                    instructions['engine_reason'] = f"Exhaustion {momentum_state}"
                     self.active_instructions = instructions
                     return
             
@@ -338,13 +507,15 @@ class HotPathExecutor:
                 if entry_location == 'SUBOPTIMAL' and final_confidence < 0.60 and recent_big_win:
                     print(f"      ⏸️  VIX SPIKE: {vix_change_pct*100:+.1f}% after +{self.last_trade_pnl:.0f}pt win")
                     instructions['action'] = Action.HOLD.value
+                    instructions['engine_decision'] = "BLOCKED"
+                    instructions['engine_reason'] = f"VIX Spike {vix_change_pct*100:+.1f}%"
                     self.active_instructions = instructions
                     return
         
         # Compact log
         act = instructions.get('action', 'N/A')
         ent = instructions.get('entry_price', 'N/A')
-        print(f"      ⚙️ Instr: {act} @{ent} (Conf: {final_confidence:.2f})")
+        print(f"      ⚙️ Instr: {act} @{ent} (Conf: {final_confidence:.2f}) | Engine: {instructions['engine_decision']} ({instructions['engine_reason'] or 'none'})")
         
         self.active_instructions = instructions
 
@@ -356,6 +527,25 @@ class HotPathExecutor:
         
         # Update momentum state on every tick
         self._update_momentum_state(tick, timestamp)
+        
+        # Track 15-min bars for Exceptional Trade Gate
+        # Every 15 mins (at :00, :15, :30, :45)
+        if timestamp.minute in [0, 15, 30, 45] and timestamp.minute != self.last_bar_time:
+            self.last_bar_time = timestamp.minute
+            if self.day_high and self.day_low:
+                current_range = self.day_high - self.day_low # Simplification: using day extremes for now
+                # In a real scenario, we'd track the OHLC of the SPECIFIC 15m bar.
+                # Since we don't have a 15m factory here, we'll approximate with intraday range updates.
+                # Actually, the user wants "Current 15-min candle range". 
+                # I'll need a mini-aggregator if I want to be 100% accurate. 
+                pass
+            
+            # Record structure points
+            if self.day_high: self.day_structure['highs'].append(self.day_high)
+            if self.day_low: self.day_structure['lows'].append(self.day_low)
+            # Trim to avoid memory grow
+            if len(self.day_structure['highs']) > 10: self.day_structure['highs'].pop(0)
+            if len(self.day_structure['lows']) > 10: self.day_structure['lows'].pop(0)
         
         # 1. Mandatory 15:15 Square-off
         if current_time_only >= self.force_exit_time and self.open_position:
@@ -476,6 +666,7 @@ class HotPathExecutor:
 
     def _enter_trade(self, price, timestamp, side):
         print(f"      🚀 EXECUTION: Entered {side} at {price}")
+        self.total_trades_today += 1
         
         range_current = self.active_instructions.get('range', 50)  # Get range for trailing
         

@@ -35,20 +35,20 @@ IF VIX > 18:
   → vix_regime = PANIC (whipsaws expected, widen SL)
 
 IF gap < 1.5%:
-  → gap_action = FILL (trade as usual)
+  → gap_action = WAIT (small gaps have no edge)
 
 IF gap 1.5-3%:
   → gap_action = WAIT (likely 50% fill, wait for confirmation)
 
 IF gap > 3%:
-  → gap_action = EXTEND (ride momentum early)
+  → gap_action = WAIT (require early price acceptance, do NOT blindly EXTEND)
 
 INVALIDATION RULE:
 - Set a price level that would PROVE your bias WRONG if breached after 11:00
 - Example: If BULLISH, invalidation_level = support - 20pts
 
 OUTPUT FORMAT:
-{"market_personality":"TRENDING|CHOPPY","vix_regime":"COMPLACENT|NORMAL|PANIC","primary_bias":"BULLISH|BEARISH","gap_action":"FILL|EXTEND|WAIT","boundary_levels":{"support_zone":<f>,"resistance_zone":<f>,"pivot_point":<f>},"invalidation_level":<f>,"max_expected_move":<f>,"morning_logic":"<brief plan>"}
+{"market_personality":"TRENDING|CHOPPY","vix_regime":"COMPLACENT|NORMAL|PANIC","primary_bias":"BULLISH|BEARISH","gap_action":"WAIT","boundary_levels":{"support_zone":<f>,"resistance_zone":<f>,"pivot_point":<f>},"invalidation_level":<f>,"max_expected_move":<f>,"morning_logic":"<brief plan>"}
 """
 
 USER_PROMPT_MORNING = """
@@ -91,6 +91,11 @@ DATA POINTS EXPLAINED:
 - Range: Today's high minus low in points
 
 DECISION RULES:
+
+STEP 0 - MODE DETERMINATION (NON-NEGOTIABLE):
+- 09:20–10:00 → OPENING_RANGE
+- After 10:30 → STRUCTURE
+- OTHERWISE → return HOLD
 
 STEP 1 - VIX REGIME:
 IF VIX < 13:
@@ -145,12 +150,21 @@ IF 3+ consecutive SL hits in same direction today:
   → ACTION = HOLD
   → Reason: "In RANGE-bound markets, strong bias leads to losses"
 
-STEP 6 - CONFIDENCE FLOOR:
-IF VIX_REGIME = PANIC AND confidence < 0.40:
-  → ACTION = HOLD
-  
-IF VIX_REGIME = NORMAL AND confidence < 0.30:
-  → ACTION = HOLD
+STEP 6 - CONFIDENCE IS CONTEXTUAL (MANDATORY):
+- OPENING_RANGE:
+  Minimum confidence = 0.50
+  Mean-reversion edges are probabilistic.
+  Confidence below 0.50 indicates noise → HOLD.
+
+- STRUCTURE:
+  Minimum confidence = 0.65
+  Structure trades require stronger confirmation.
+  Confidence below 0.65 → HOLD.
+
+ENFORCEMENT RULE:
+If confidence is below the minimum allowed for the current MODE,
+you MUST return action = HOLD.
+Do NOT return BUY_CALL or BUY_PUT with insufficient confidence.
 
 STEP 7 - SL AND TARGET CALCULATION:
 Calculate dynamically based on market conditions:
@@ -172,11 +186,6 @@ target_points = sl_points × TARGET_MULTIPLIER
     SUBOPTIMAL entry: 1.5
   
   MINIMUM: target_points ≥ 60
-
-EXAMPLE:
-  Range = 100pts, VIX = 15 (NORMAL), Personality = TRENDING
-  sl_points = 0.4 × 100 × 1.0 = 40
-  target_points = 40 × 2.5 = 100
 
 - Output sl_points and target_points as positive integers
 - The system will calculate final prices automatically
@@ -240,11 +249,13 @@ EXIT_NOW (immediate exit):
 - IF price breaks invalidation level → exit
 - IF price approaches defended level with momentum stalling → take profit
 
+ANY HOLD response MUST contain a short, human-readable reason.
+
 OUTPUT FORMAT (NO position):
-{"sentiment":"STRENGTH|WEAKNESS|STALL","action":"BUY_CALL|BUY_PUT|HOLD","entry":<close|null>,"sl_points":<int>,"target_points":<int>,"confidence":<0-1>,"entry_location":"OPTIMAL|GOOD|SUBOPTIMAL","reason":"<brief>"}
+{"sentiment":"STRENGTH|WEAKNESS|STALL","action":"BUY_CALL|BUY_PUT|HOLD","mode":"OPENING_RANGE|STRUCTURE|UNKNOWN","entry":<close|null>,"sl_points":<int>,"target_points":<int>,"confidence":<0-1>,"entry_location":"OPTIMAL|GOOD|SUBOPTIMAL","reason":"<required short reason>"}
 
 OUTPUT FORMAT (position OPEN):
-{"action":"HOLD|ADJUST_SL|ADJUST_TARGET|EXIT_NOW","new_sl_points":<int|null>,"new_target_points":<int|null>,"confidence":<0-1>,"adjustment_reason":"<10 words max>"}
+{"action":"HOLD|ADJUST_SL|ADJUST_TARGET|EXIT_NOW","new_sl_points":<int|null>,"new_target_points":<int|null>,"confidence":<0-1>,"adjustment_reason":"<required 10 words max>"}
 """
 
 USER_PROMPT_TACTICAL = """

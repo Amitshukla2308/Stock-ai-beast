@@ -486,6 +486,21 @@ class BacktestMode(BaseMode):
             "plan": logic
         }, mode_tag="BACKTEST")
 
+        # --- EMIT LLM_TRACE (UPGRADE) ---
+        trace_payload = {
+            "llm_type": "MORNING",
+            "time": ts.strftime('%H:%M'),
+            "mode": "N/A",
+            "action": "N/A",
+            "confidence": 0.0,
+            "sl_points": None,
+            "target_points": None,
+            "reason": logic,
+            "engine_decision": "EXECUTED",
+            "engine_reason": None
+        }
+        self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag="BACKTEST")
+
     def trigger_tactical_update(self, tick):
         if isinstance(tick, pd.Series): tick = tick.to_dict()
         
@@ -537,8 +552,64 @@ class BacktestMode(BaseMode):
                     instructions['pivot'] = levels.get('pivot_point', 0)
                     instructions['resistance'] = levels.get('resistance_zone', 0)
                 
+                # FIX: Inject tick_time for Exceptional Gate
+                # Note: tick['timestamp'] is ALREADY in IST (converted at line 277)
+                tick_ts = tick['timestamp']
+                # Extract time directly - it's already IST-aware
+                raw_tick_time = tick_ts.time() if hasattr(tick_ts, 'time') else tick_ts
+                # Store raw time for gate comparison, string for JSON logging
+                instructions['tick_time'] = raw_tick_time
+                instructions['tick_time_str'] = str(raw_tick_time) if raw_tick_time else 'N/A'
+                instructions['close'] = tick['close']
+                
                 self.hot_path.update_instructions(instructions)
                 self.journal.log_event(tick['timestamp'], "TACTICAL", instructions)
+
+                # DEBUG: Confirm we reached this point
+                print(f"      🔍 TRACE_DEBUG: Emitting TACTICAL LLM_TRACE at {tick['timestamp'].strftime('%H:%M')}")
+                
+                # --- EMIT LLM_TRACE (UPGRADE) ---
+                try:
+                    # Extract last 3 5-min candles for visibility
+                    today_5min = context.get('today_5min', [])
+                    last_3_candles = []
+                    if today_5min:
+                        for c in today_5min[-3:]:
+                            last_3_candles.append({
+                                't': c.get('ts', 'N/A')[-5:] if c.get('ts') else 'N/A',  # Just HH:MM
+                                'o': round(c.get('o', 0), 1),
+                                'h': round(c.get('h', 0), 1),
+                                'l': round(c.get('l', 0), 1),
+                                'c': round(c.get('c', 0), 1)
+                            })
+                    
+                    trace_payload = {
+                        "llm_type": "TACTICAL",
+                        "time": tick['timestamp'].strftime('%H:%M'),
+                        "tick_time": str(instructions.get('tick_time', 'N/A')),
+                        "mode": instructions.get('mode', 'UNKNOWN'),
+                        "action": instructions.get('action', 'HOLD'),
+                        "confidence": instructions.get('confidence', 0.0),
+                        "sl_points": instructions.get('sl_points'),
+                        "target_points": instructions.get('target_points'),
+                        "reason": instructions.get('technical_reason', instructions.get('reason', 'N/A')),
+                        "engine_decision": instructions.get('engine_decision', 'EXECUTED'),
+                        "engine_reason": instructions.get('engine_reason'),
+                        "last_3_candles": last_3_candles
+                    }
+                    self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag="BACKTEST")
+                except Exception as trace_err:
+                    print(f"      ❌ TACTICAL TRACE EMIT ERROR: {trace_err}")
+                
+                # --- EMIT EXCEPTIONAL GATE REJECTION (if applicable) ---
+                if instructions.get('gate_rejected'):
+                    self._emit_telegram_event("TRADE_REJECTED_EXCEPTIONAL_GATE", {
+                        "time": tick['timestamp'].strftime('%H:%M'),
+                        "action": instructions.get('action'),
+                        "confidence": instructions.get('confidence', 0.0),
+                        "rejection_reason": instructions.get('engine_reason')
+                    }, mode_tag="BACKTEST")
+
         except KeyError as e:
             logger.error(f"   ❌ TACTICAL KEY ERROR: {e}")
             logger.error(f"      Tick Keys: {list(tick.keys())}")
@@ -594,6 +665,21 @@ class BacktestMode(BaseMode):
             "win_rate": stats.get('win_rate'),
             "nugget": audit_res.get('dataset_nugget', audit_res.get('nugget_good', 'N/A'))
         }, mode_tag="BACKTEST")
+
+        # --- EMIT LLM_TRACE (UPGRADE) ---
+        trace_payload = {
+            "llm_type": "EOD",
+            "time": "15:30",
+            "mode": "N/A",
+            "action": "N/A",
+            "confidence": 0.0,
+            "sl_points": None,
+            "target_points": None,
+            "reason": summary,
+            "engine_decision": "EXECUTED",
+            "engine_reason": None
+        }
+        self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag="BACKTEST")
         
         # Save Experience for RAG/RL
         stats = {

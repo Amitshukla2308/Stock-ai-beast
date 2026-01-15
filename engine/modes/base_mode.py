@@ -40,9 +40,12 @@ class BaseMode(ABC):
             # URL: http://n8n:5678/webhook/telegram-push inside Docker network
             webhook_url = "http://host.docker.internal:5678/webhook/telegram-push"
             try:
-                requests.post(webhook_url, json=clean_payload, timeout=2)
+                resp = requests.post(webhook_url, json=clean_payload, timeout=2)
+                if resp.status_code != 200:
+                    print(f"⚠️ Webhook returned {resp.status_code}: {resp.text[:100]}")
             except Exception as w_err:
-                print(f"⚠️ Webhook Push Failed: {w_err}")
+                print(f"⚠️ Webhook Push Failed ({event_type}): {w_err}")
                 
         except Exception as e:
-            print(f"⚠️ Telegram Emit Error: {e}")
+            print(f"⚠️ Telegram Emit Error ({event_type}): {e}")
+

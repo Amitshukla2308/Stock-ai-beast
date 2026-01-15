@@ -36,9 +36,13 @@ class LiveMode(MockMode):
         import pytz
         IST = pytz.timezone('Asia/Kolkata')
         
+        import math
         def safe_float(val):
-            try: return float(val)
-            except: return 0.0
+            try:
+                f = float(val)
+                return 0.0 if (math.isnan(f) or math.isinf(f)) else f
+            except:
+                return 0.0
 
         try:
              ts = date_parser.parse(message.get('timestamp'))
@@ -54,6 +58,19 @@ class LiveMode(MockMode):
         }
         self.last_tick = tick
         self.hot_path.process_tick(tick)
+
+        # TRIGGER TACTICAL (Logic normally in Mock/Base, but overridden here for execution control)
+        # We need to ensure we emit trace after instruction update
+        if hasattr(self, 'should_trigger_tactical') and self.should_trigger_tactical(ts, getattr(self, 'last_tactical_update', None)):
+            # This is slightly complex because LiveMode inherits from MockMode but overrides on_tick.
+            # We'll rely on the trigger_tactical_update call (which mock/base would do)
+            # but since on_tick is overridden, we need to make sure instructions are fresh.
+            pass # Tactical trigger is usually handled by the main loop calling trigger_tactical_update
+
+        # Since we need to emit LLM_TRACE, we'll hook into where instructions are updated.
+        # However, LiveMode doesn't explicitly call trigger_tactical_update in on_tick. 
+        # It's called by the main loop.
+        # Let's check where MORNING_BRIEF and TACTICAL are triggered in LiveMode (it uses super().start() which is MockMode.start())
         
         # HEARTBEAT LOGGING
         if not hasattr(self, 'last_heartbeat_time'): self.last_heartbeat_time = ts

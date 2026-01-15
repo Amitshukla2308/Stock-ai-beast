@@ -17,9 +17,14 @@ load_dotenv()
 import logging
 logger = logging.getLogger(__name__)
 
+import math
+
 def safe_float(val):
-    try: return float(val)
-    except: return 0.0
+    try:
+        f = float(val)
+        return 0.0 if (math.isnan(f) or math.isinf(f)) else f
+    except:
+        return 0.0
 
 class MockMode(BaseMode):
     def __init__(self, debug_schedule=False, symbol="BANKNIFTY", chat_id=None):
@@ -180,6 +185,21 @@ class MockMode(BaseMode):
             "plan": brief.get('morning_logic', brief.get('reasoning'))
         }, mode_tag=self.mode_tag)
 
+        # --- EMIT LLM_TRACE (UPGRADE) ---
+        trace_payload = {
+            "llm_type": "MORNING",
+            "time": sim_time.strftime('%H:%M'),
+            "mode": "N/A",
+            "action": "N/A",
+            "confidence": 0.0,
+            "sl_points": None,
+            "target_points": None,
+            "reason": brief.get('morning_logic', brief.get('reasoning')),
+            "engine_decision": "EXECUTED",
+            "engine_reason": None
+        }
+        self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag=self.mode_tag)
+
     def trigger_tactical_update(self):
         if not self.last_tick: return
         sim_time = self.last_tick['timestamp']
@@ -212,8 +232,38 @@ class MockMode(BaseMode):
             self.last_tick, context, self.morning_brief, 0, self.hot_path.open_position, day_pnl=day_pnl, symbol=self.symbol
         )
         if instructions:
+             # FIX: Inject tick_time for Exceptional Gate (use sim_time)
+             instructions['tick_time'] = sim_time.time() if hasattr(sim_time, 'time') else sim_time
+             instructions['close'] = self.last_tick.get('close', 0) if self.last_tick else 0
+             
              self.hot_path.update_instructions(instructions)
              self.journal.log_event(datetime.now(IST), "TACTICAL", instructions)
+
+             # --- EMIT LLM_TRACE (UPGRADE) ---
+             trace_payload = {
+                 "llm_type": "TACTICAL",
+                 "time": sim_time.strftime('%H:%M'),
+                 "tick_time": str(instructions.get('tick_time', 'N/A')),
+                 "mode": instructions.get('mode', 'UNKNOWN'),
+                 "action": instructions.get('action', 'HOLD'),
+                 "confidence": instructions.get('confidence', 0.0),
+                 "sl_points": instructions.get('sl_points'),
+                 "target_points": instructions.get('target_points'),
+                 "reason": instructions.get('technical_reason', instructions.get('reason', 'N/A')),
+                 "engine_decision": instructions.get('engine_decision', 'EXECUTED'),
+                 "engine_reason": instructions.get('engine_reason')
+             }
+             self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag=self.mode_tag)
+             
+             # --- EMIT EXCEPTIONAL GATE REJECTION (if applicable) ---
+             if instructions.get('gate_rejected'):
+                 self._emit_telegram_event("TRADE_REJECTED_EXCEPTIONAL_GATE", {
+                     "time": sim_time.strftime('%H:%M'),
+                     "action": instructions.get('action'),
+                     "confidence": instructions.get('confidence', 0.0),
+                     "rejection_reason": instructions.get('engine_reason')
+                 }, mode_tag=self.mode_tag)
+
 
     def trigger_eod_journal(self):
         print(f"   [15:30] 📔 EOD Journaling & Audit...")
@@ -256,6 +306,21 @@ class MockMode(BaseMode):
             "win_rate": (len([t for t in day_trades if t.get('pnl', 0) > 0]) / len(day_trades) * 100) if day_trades else 0,
             "nugget": audit_res.get('dataset_nugget', audit_res.get('nugget_good', 'N/A'))
         }, mode_tag=self.mode_tag)
+
+        # --- EMIT LLM_TRACE (UPGRADE) ---
+        trace_payload = {
+            "llm_type": "EOD",
+            "time": "15:30",
+            "mode": "N/A",
+            "action": "N/A",
+            "confidence": 0.0,
+            "sl_points": None,
+            "target_points": None,
+            "reason": summary,
+            "engine_decision": "EXECUTED",
+            "engine_reason": None
+        }
+        self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag=self.mode_tag)
 
         # OPTIONAL: Save Experience for RAG/RL (Mirroring backtest)
         from data.database import save_experience

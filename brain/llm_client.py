@@ -2,6 +2,7 @@ import os
 import json
 import time
 import logging
+import math
 from openai import OpenAI
 from dotenv import load_dotenv
 from brain.prompts import (
@@ -369,9 +370,56 @@ class LLMClient:
         data = self._query_model(SYSTEM_PROMPT_TACTICAL, prompt)
         
         if data:
-            # Output Normalization & Calculation
+            # --- NORMALIZATION (MANDATORY UPGRADE) ---
+            
+            # 1. Deterministic Mode Injection
+            try:
+                # Extract time from tick or current_time string
+                # timestamp is already extracted in get_tactical_update
+                if current_time != "N/A":
+                    tm = time.strptime(current_time, "%H:%M")
+                    hr_min = tm.tm_hour * 100 + tm.tm_min # e.g. 0920
+                    
+                    if 920 <= hr_min <= 1000:
+                        data['mode'] = "OPENING_RANGE"
+                    elif hr_min > 1030:
+                        data['mode'] = "STRUCTURE"
+                    else:
+                        # Logic: strictly between 10:01 and 10:30, 
+                        # OR before 9:20 (pre-open briefing handled separately)
+                        # We return HOLD for this period in normalization
+                        if hr_min > 1000 and hr_min <= 1030:
+                            data['action'] = "HOLD"
+                            data['reason'] = data.get('reason') or "Market cooling period (10:00-10:30)"
+                        data['mode'] = "UNKNOWN"
+                else:
+                    data['mode'] = "UNKNOWN"
+            except:
+                data['mode'] = "UNKNOWN"
+
+            # 2. Confidence Normalization
+            try:
+                conf_val = data.get('confidence', 0)
+                if conf_val is None: conf_val = 0
+                f_conf = float(conf_val)
+                if math.isnan(f_conf) or math.isinf(f_conf):
+                    f_conf = 0.0
+                data['confidence'] = max(0.0, min(1.0, f_conf))
+            except:
+                data['confidence'] = 0.0
+
+            # 3. Action Normalization
             action = data.get('decision', data.get('action', 'HOLD'))
             data['action'] = action
+            
+            # 4. Reason Normalization (HOLD must have a reason)
+            reason = data.get('reason', data.get('adjustment_reason', ''))
+            if action == 'HOLD' and not reason:
+                reason = "Market not in optimal zone for entry"
+            data['technical_reason'] = reason
+            data['reason'] = reason # Ensure both are set for compatibility
+            
+            # --- CALCULATION (EXISTING LOGIC) ---
             
             # Entry Price
             close_price = close # From local var
@@ -383,15 +431,23 @@ class LLMClient:
 
             # SL/Target Calculation (Points -> Price)
             # Support both 'sl_points' (new) and 'sl' (legacy/hallucination) keys
-            sl_raw = float(data.get('sl_points', data.get('sl', 0)) or 0)
-            tgt_raw = float(data.get('target_points', data.get('target', 0)) or 0)
+            def get_safe_pt(key_primary, key_secondary):
+                val = data.get(key_primary, data.get(key_secondary, 0))
+                if val is None: val = 0
+                try:
+                    f = float(val)
+                    return 0.0 if (math.isnan(f) or math.isinf(f)) else f
+                except:
+                    return 0.0
+
+            sl_raw = get_safe_pt('sl_points', 'sl')
+            tgt_raw = get_safe_pt('target_points', 'target')
             
             # Heuristic: If value > 1000, model likely outputted PRICE instead of POINTS.
             # Convert to points (distance)
             sl_points = sl_raw
             if sl_raw > 1000:
                  sl_points = abs(entry - sl_raw)
-                 # print(f"⚠️ CALC: Converted SL Price {sl_raw} -> Dist {sl_points}")
             
             tgt_points = tgt_raw
             if tgt_raw > 1000:
@@ -411,14 +467,12 @@ class LLMClient:
             # Store Final Prices
             data['sl'] = round(sl_price, 2)
             data['target'] = round(tgt_price, 2)
-            data['confidence'] = data.get('confidence')
-            
-            reason = data.get('reason', data.get('adjustment_reason', ''))
-            data['technical_reason'] = reason
+            data['sl_points'] = sl_points
+            data['target_points'] = tgt_points
             
             # Log
             reason_short = reason[:40] + '...' if len(reason) > 40 else reason
-            logger.info(f"      🔸 {action} | Entry:{entry:.1f} | SL:{data['sl']} (-{sl_points:.1f}) | TGT:{data['target']} (+{tgt_points:.1f}) | {reason_short}")
+            logger.info(f"      🔸 {action} | Mode:{data['mode']} | Entry:{entry:.1f} | SL:{data['sl']} (-{sl_points:.1f}) | TGT:{data['target']} (+{tgt_points:.1f}) | {reason_short}")
             
         return data
 
