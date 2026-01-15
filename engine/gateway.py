@@ -99,7 +99,7 @@ def get_engine(mode, args=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stock AI Beast Gateway")
-    parser.add_argument("mode", choices=['backtest', 'mock', 'live'], help="Trading Mode")
+    parser.add_argument("mode", choices=['backtest', 'mock', 'live'], nargs='?', help="Trading Mode")
     parser.add_argument("--days", type=int, default=5, help="Days for backtest")
     parser.add_argument("--start-date", type=str, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD)")
@@ -107,8 +107,30 @@ if __name__ == "__main__":
     parser.add_argument("--balance", type=int, default=30000, help="Starting balance in rupees")
     parser.add_argument("--chat-id", type=str, default=None, help="Telegram Chat ID for notifications")
     parser.add_argument("--debug-schedule", action="store_true", help="Fast schedule for debugging")
+    parser.add_argument("--validate-auth", action="store_true", help="Only validate auth and exit")
     
     args = parser.parse_args()
+
+    if args.validate_auth:
+        try:
+            check_token()
+            print("✅ AUTH_OK")
+            sys.exit(0)
+        except Exception as e:
+            print(f"❌ AUTH_FAILED: {e}")
+            sys.exit(1)
+    
+    if not args.validate_auth and not args.mode:
+        parser.error("the following arguments are required: mode")
+    
+    if args.validate_auth:
+        try:
+            check_token()
+            print("✅ AUTH_OK")
+            sys.exit(0)
+        except Exception as e:
+            print(f"❌ AUTH_FAILED: {e}")
+            sys.exit(1)
     
     print(f"🔌 Gateway calling Service: {args.mode.upper()}")
     
