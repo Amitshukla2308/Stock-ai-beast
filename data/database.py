@@ -288,7 +288,8 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
                 prev_close = prev[4]
                 # True Range = max(H-L, |H-PrevClose|, |L-PrevClose|)
                 tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            true_ranges.append(tr)
+                true_ranges.append(tr)
+            
             # ATR = average of last 14 true ranges
             atr_14 = round(sum(true_ranges[-14:]) / 14, 2)
         
