@@ -9,7 +9,7 @@ import sys
 import os
 
 # Configure Logging (Dual Output)
-log_dir = "/app/logs"
+log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
 logging.basicConfig(
     level=logging.DEBUG,

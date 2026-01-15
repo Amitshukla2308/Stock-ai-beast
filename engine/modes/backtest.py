@@ -82,6 +82,10 @@ class BacktestMode(BaseMode):
         self.morning_brief = None
         self.running = False
 
+        # Progress Tracking
+        self.b_days = pd.bdate_range(start=self.start_date.date(), end=self.end_date.date())
+        self.total_days = len(self.b_days)
+
 
 
     def start(self):
@@ -100,6 +104,15 @@ class BacktestMode(BaseMode):
             end_date=self.end_date.strftime('%Y-%m-%d')
         )
         
+        # TELEGRAM: Session Start
+        self._emit_telegram_event("SESSION_START", {
+            "symbol": self.symbol,
+            "start_date": self.start_date.strftime('%Y-%m-%d'),
+            "end_date": self.end_date.strftime('%Y-%m-%d'),
+            "total_days": self.total_days,
+            "initial_balance": self.balance_monitor.initial_balance
+        }, mode_tag="BACKTEST")
+
         self.running = True
         try:
             self._run_simulation()
@@ -296,9 +309,19 @@ class BacktestMode(BaseMode):
 
     def _run_simulation(self):
         current_date = self.start_date
+        day_index = 0
         
         while current_date <= self.end_date and self.running:
-            logger.info(f"🌞 Simulating Day: {current_date.date()}")
+            day_index += 1
+            logger.info(f"🌞 Simulating Day: {current_date.date()} ({day_index}/{self.total_days})")
+            
+            # TELEGRAM: Daily Progress
+            self._emit_telegram_event("SESSION_PROGRESS", {
+                "day_index": day_index,
+                "total_days": self.total_days,
+                "date": current_date.strftime('%Y-%m-%d'),
+                "balance": self.balance_monitor.current_balance
+            }, mode_tag="BACKTEST")
             
             # 1. Fetch Day's Tick Data
             day_ticks = self.fetch_data_for_day(current_date)
@@ -397,7 +420,14 @@ class BacktestMode(BaseMode):
                     except Exception as e:
                         logger.error(f"   ❌ Tactical Update Error at {current_time}: {e}")
                     
-                # D. Heartbeat Log removed for compact output - trade executions provide sufficient visibility
+                # D. Heartbeat Log (Every 2 Simulated Hours)
+                if last_heartbeat_time is None or (current_time - last_heartbeat_time).total_seconds() >= 7200:
+                    self._emit_telegram_event("HEARTBEAT", {
+                        "time": current_time.strftime('%H:%M'),
+                        "balance": self.balance_monitor.current_balance,
+                        "open_pnl": current_pnl
+                    }, mode_tag="BACKTEST")
+                    last_heartbeat_time = current_time
             
             # 4. EOD Journal
             self.trigger_eod_journal(current_date)
@@ -478,7 +508,15 @@ class BacktestMode(BaseMode):
         if gap_info:
             mb_context['gap_info'] = gap_info
 
-        brief = self.brain.get_morning_brief(mb_context, current_tick=first_tick, symbol=self.symbol)
+        try:
+            brief = self.brain.get_morning_brief(mb_context, current_tick=first_tick, symbol=self.symbol)
+        except Exception as e:
+            self._emit_telegram_event("ERROR_ALERT", {
+                "component": "MORNING_BRIEF",
+                "time": ts.strftime('%H:%M'),
+                "error": str(e)
+            }, mode_tag="BACKTEST")
+            brief = None
         
         if not brief:
              logger.info("      ⚠️ Brain Malfunction (Morning). Using Default Passive Plan.")
@@ -498,7 +536,9 @@ class BacktestMode(BaseMode):
             "date": ts.strftime('%Y-%m-%d'),
             "personality": brief.get('market_personality'),
             "bias": brief.get('primary_bias'),
-            "plan": logic
+            "plan": logic,
+            "vix": mb_context.get('vix_spot'),
+            "gap": gap_info
         }, mode_tag="BACKTEST")
 
     def trigger_tactical_update(self, tick):
@@ -543,6 +583,11 @@ class BacktestMode(BaseMode):
                 )
             except Exception as llm_err:
                 logger.error(f"   ❌ LLM TACTICAL CALL FAILED: {llm_err}")
+                self._emit_telegram_event("ERROR_ALERT", {
+                    "component": "TACTICAL_UPDATE",
+                    "time": tick['timestamp'].strftime('%H:%M'),
+                    "error": str(llm_err)
+                }, mode_tag="BACKTEST")
                 import traceback
                 traceback.print_exc()
                 instructions = None
@@ -679,6 +724,7 @@ class BacktestMode(BaseMode):
             "total_pnl": stats.get('total_pnl'),
             "trades": stats.get('trade_count'),
             "win_rate": stats.get('win_rate'),
+            "balance": self.balance_monitor.current_balance,
             "nugget": audit_res.get('dataset_nugget', audit_res.get('nugget_good', 'N/A'))
         }, mode_tag="BACKTEST")
 
