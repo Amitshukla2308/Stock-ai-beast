@@ -18,7 +18,7 @@ def kill_existing():
         pass
     time.sleep(1)
 
-def trigger(mode, days, debug, symbol="NIFTY", start_date=None, end_date=None, balance=30000):
+def trigger(mode, days, debug, symbol="NIFTY", start_date=None, end_date=None, balance=30000, **kwargs):
     kill_existing()
     print(f"🔥 Triggering Mode: {mode.upper()} for {symbol}")
 
@@ -29,6 +29,10 @@ def trigger(mode, days, debug, symbol="NIFTY", start_date=None, end_date=None, b
             cmd += f" --start-date {start_date} --end-date {end_date}"
         else:
             cmd += f" --days {days}"
+        
+        if kwargs.get('chat_id'):
+            cmd += f" --chat-id {kwargs['chat_id']}"
+            
         run_command(cmd)
 
     elif mode == "mock":
@@ -78,6 +82,7 @@ if __name__ == "__main__":
     parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD)")
     parser.add_argument("--symbol", type=str, default="NIFTY", help="Ticker symbol")
     parser.add_argument("--balance", type=int, default=30000, help="Starting balance in rupees (default: 30000)")
+    parser.add_argument("--chat-id", type=str, help="Telegram Chat ID for notifications")
     parser.add_argument("--debug", action="store_true", help="Enable fast schedule for testing")
     
     if len(sys.argv) == 1:
@@ -85,4 +90,4 @@ if __name__ == "__main__":
         sys.exit(1)
         
     args = parser.parse_args()
-    trigger(args.mode, args.days, args.debug, args.symbol, args.start_date, args.end_date, args.balance)
+    trigger(args.mode, args.days, args.debug, args.symbol, args.start_date, args.end_date, args.balance, chat_id=args.chat_id)

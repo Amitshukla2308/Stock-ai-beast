@@ -205,7 +205,7 @@ class BacktestMode(BaseMode):
                 except: continue
 
             logger.info(f"\n📈 OVERALL PERFORMANCE:")
-            logger.info(f"   - Total PnL:     {total_pnl:+.2f} points")
+            logger.info(f"   - Total PnL:     {total_pnl:+.2f} points (₹{total_pnl * PTS_TO_RUPEES:+,.2f} @ ₹{PTS_TO_RUPEES}/pt)")
             logger.info(f"   - Max Drawdown:  {abs(max_dd):.2f} points")
             logger.info(f"   - Win Rate:      {win_rate:.1f}% ({total_trades} trades)")
             
