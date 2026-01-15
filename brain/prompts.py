@@ -204,7 +204,15 @@ You MUST reason in this order:
 3. Market Micro Context (structure, swing, volume)
 4. Economic Context (₹ impact)
 5. Time-of-day risk
-6. Morning bias strength
+6. Macro sentiment alignment
+
+--------------------------------------------------
+NEGATIVE CONSTRAINTS (MANDATORY)
+--------------------------------------------------
+
+1. DO NOT suggest an SL > 50 pts unless in extreme volatility. (Reference ATR: {atr})
+2. DO NOT allow Macro Sentiment to override Style-specific reversal rules.
+3. If price is at Resistance, DO NOT BUY_CALL even if the day is BULLISH. 
 
 --------------------------------------------------
 STYLE SELECTION RULE
@@ -280,10 +288,10 @@ OUTPUT FORMAT (NO POSITION)
   "action": "BUY_CALL|BUY_PUT|HOLD",
   "mode": "OPENING_RANGE|STRUCTURE|UNKNOWN",
   "entry": <close|null>,
-  "sl_points": <int>,
-  "target_points": <int>,
+  "sl_points": <int> (Hint: 1.5x ATR is standard),
+  "target_points": <int> (Hint: 2.5x ATR is standard),
   "confidence": <0-1>,
-  "entry_location": "OPTIMAL|GOOD|SUBOPTIMAL|MID_RANGE",
+  "entry_location": "OPTIMAL_TOP|OPTIMAL_BOTTOM|GOOD|SUBOPTIMAL|MID_RANGE",
   "reason": "Style [X] selected because [Y]. Rejected [Z] because [W]."
 }
 
@@ -337,8 +345,8 @@ ATR={atr}
 
 MORNING CONTEXT:
 Market Personality={market_personality}
-Primary Bias={primary_bias}
-Bias Strength={bias_strength}
+Macro Sentiment (Prior)={primary_bias}
+Sentiment Strength={bias_strength}
 Support={support}
 Pivot={pivot}
 Resistance={resistance}

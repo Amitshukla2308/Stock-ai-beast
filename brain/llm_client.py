@@ -547,6 +547,31 @@ class LLMClient:
             data['technical_reason'] = reason
             data['reason'] = reason # Ensure both are set for compatibility
 
+            # --- PHASE-2.5: PHYSICAL REASONABILITY GATING ---
+            
+            # Safe ATR access
+            raw_atr = context.get('atr_14', context.get('atr', 15))
+            try:
+                atr = float(raw_atr)
+            except:
+                atr = 15.0
+            
+            # SL Gating
+            sl = data.get('sl_points', 0)
+            if sl and isinstance(sl, (int, float)) and sl > 4 * atr:
+                old_sl = sl
+                data['sl_points'] = round(1.5 * atr)
+                logger.warning(f"      🚨 LLM Hallucinated Massive SL: {old_sl} | Capped to {data['sl_points']} (1.5x ATR)")
+                data['reason'] = f"(SL Capped) {data.get('reason', '')}"
+
+            # Target Gating
+            tgt = data.get('target_points', 0)
+            if tgt and isinstance(tgt, (int, float)) and tgt > 15 * atr: # Target can be larger, but not infinite
+                old_tgt = tgt
+                data['target_points'] = round(3 * atr)
+                logger.warning(f"      🚨 LLM Hallucinated Massive Target: {old_tgt} | Capped to {data['target_points']} (3x ATR)")
+                data['reason'] = f"(Target Capped) {data.get('reason', '')}"
+
             # --- PHASE-2.5: STRATEGIC REMR GUARD (Physical Enforcement) ---
             selected_style = data.get('selected_style', 'NONE')
             if selected_style == 'REMR' and action in ['BUY_CALL', 'BUY_PUT']:
