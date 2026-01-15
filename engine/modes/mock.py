@@ -160,8 +160,6 @@ class MockMode(BaseMode):
         
         if self.last_morning_date == sim_time.date(): return
         
-        if self.last_morning_date == sim_time.date(): return
-        
         logger.info(f"   [{sim_time.strftime('%H:%M')}] 🧠 Morning Briefing...")
         context = fetch_context_data(sim_time, symbol=self.symbol)
         
@@ -177,28 +175,12 @@ class MockMode(BaseMode):
         self.last_morning_date = sim_time.date()
         self.journal.log_event(sim_time, "MORNING", brief)
         
-        # TELEGRAM NOTIFICATION
         self._emit_telegram_event("MORNING_BRIEF", {
             "date": sim_time.strftime('%Y-%m-%d'),
             "personality": brief.get('market_personality'),
             "bias": brief.get('primary_bias'),
             "plan": brief.get('morning_logic', brief.get('reasoning'))
         }, mode_tag=self.mode_tag)
-
-        # --- EMIT LLM_TRACE (UPGRADE) ---
-        trace_payload = {
-            "llm_type": "MORNING",
-            "time": sim_time.strftime('%H:%M'),
-            "mode": "N/A",
-            "action": "N/A",
-            "confidence": 0.0,
-            "sl_points": None,
-            "target_points": None,
-            "reason": brief.get('morning_logic', brief.get('reasoning')),
-            "engine_decision": "EXECUTED",
-            "engine_reason": None
-        }
-        self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag=self.mode_tag)
 
     def trigger_tactical_update(self):
         if not self.last_tick: return
@@ -236,8 +218,33 @@ class MockMode(BaseMode):
              instructions['tick_time'] = sim_time.time() if hasattr(sim_time, 'time') else sim_time
              instructions['close'] = self.last_tick.get('close', 0) if self.last_tick else 0
              
+             # Extract micro/economic context for logging (they were injected into the client internally)
+             # But wait, the client doesn't return them. 
+             # Actually, they are purely for the LLM prompt. 
+             # I should probably return them from get_tactical_update or calculate them here.
+             # Given the "NO CHANGE" rules, I'll calculate them here to avoid changing LLMClient signature.
+             from engine.enrichment import calculate_micro_context, calculate_economic_context, calculate_opening_range
+             or_data = calculate_opening_range(context.get('today_5min', []))
+             or_range = or_data['or_range'] if or_data else 0
+
+             micro_context = calculate_micro_context(
+                 bars_15min=context.get('last_15min', []),
+                 current_price=self.last_tick['close'],
+                 support=self.morning_brief.get('boundary_levels', {}).get('support_zone', 0),
+                 resistance=self.morning_brief.get('boundary_levels', {}).get('resistance_zone', 0),
+                 pivot=self.morning_brief.get('boundary_levels', {}).get('pivot_point', 0),
+                 atr_14=context.get('atr_14'),
+                 or_range=or_range
+             )
+             economic_context = calculate_economic_context(
+                 current_price=self.last_tick['close'],
+                 target_pts=self.morning_brief.get('max_expected_move', 60)
+             )
+
              self.hot_path.update_instructions(instructions)
-             self.journal.log_event(datetime.now(IST), "TACTICAL", instructions)
+             self.journal.log_event(datetime.now(IST), "TACTICAL", instructions, 
+                                    micro_context=micro_context, 
+                                    economic_context=economic_context)
 
              # --- EMIT LLM_TRACE (UPGRADE) ---
              trace_payload = {
@@ -245,13 +252,16 @@ class MockMode(BaseMode):
                  "time": sim_time.strftime('%H:%M'),
                  "tick_time": str(instructions.get('tick_time', 'N/A')),
                  "mode": instructions.get('mode', 'UNKNOWN'),
+                 "selected_style": instructions.get('selected_style', 'NONE'),
                  "action": instructions.get('action', 'HOLD'),
                  "confidence": instructions.get('confidence', 0.0),
                  "sl_points": instructions.get('sl_points'),
                  "target_points": instructions.get('target_points'),
                  "reason": instructions.get('technical_reason', instructions.get('reason', 'N/A')),
                  "engine_decision": instructions.get('engine_decision', 'EXECUTED'),
-                 "engine_reason": instructions.get('engine_reason')
+                 "engine_reason": instructions.get('engine_reason'),
+                 "market_micro_context": micro_context,
+                 "economic_context": economic_context
              }
              self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag=self.mode_tag)
              

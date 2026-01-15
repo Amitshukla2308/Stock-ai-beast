@@ -9,8 +9,8 @@ from data.database import get_connection
 # Instrument Constants
 LOT_SIZES = {
     "BANKNIFTY": 15,
-    "NIFTY": 25,
-    "FINNIFTY": 25
+    "NIFTY": 65,
+    "FINNIFTY": 65
 }
 OPTION_PREMIUM_MULTIPLIER = 0.6  # Avg factor to convert index points to option premium
 

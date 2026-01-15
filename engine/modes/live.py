@@ -59,6 +59,14 @@ class LiveMode(MockMode):
         self.last_tick = tick
         self.hot_path.process_tick(tick)
 
+        # TRIGGER TACTICAL enrichment (Mirroring MockMode logic)
+        # We need to ensure we emit trace after instruction update
+        if hasattr(self, 'should_trigger_tactical') and self.should_trigger_tactical(ts, getattr(self, 'last_tactical_update', None)):
+             # Capture micro context immediately after update
+             from engine.enrichment import calculate_micro_context, calculate_economic_context
+             # Note: context is usually fetched in trigger_tactical_update
+             pass 
+
         # TRIGGER TACTICAL (Logic normally in Mock/Base, but overridden here for execution control)
         # We need to ensure we emit trace after instruction update
         if hasattr(self, 'should_trigger_tactical') and self.should_trigger_tactical(ts, getattr(self, 'last_tactical_update', None)):

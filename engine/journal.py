@@ -32,7 +32,9 @@ class Journal:
                 session_id VARCHAR,
                 timestamp TIMESTAMP,
                 event_type VARCHAR, -- 'MORNING', 'TACTICAL', 'EOD'
-                content VARCHAR     -- JSON string or text summary
+                content VARCHAR,     -- JSON string or text summary
+                market_micro_context VARCHAR, -- JSON
+                economic_context VARCHAR      -- JSON
             )
         """)
 
@@ -66,6 +68,14 @@ class Journal:
             if 'session_id' not in cols_logs:
                 print("   🛠️ Migrating 'simulation_logs': Adding session_id column...")
                 conn.execute("ALTER TABLE simulation_logs ADD COLUMN session_id VARCHAR")
+            
+            if 'market_micro_context' not in cols_logs:
+                print("   🛠️ Migrating 'simulation_logs': Adding market_micro_context column...")
+                conn.execute("ALTER TABLE simulation_logs ADD COLUMN market_micro_context VARCHAR")
+                
+            if 'economic_context' not in cols_logs:
+                print("   🛠️ Migrating 'simulation_logs': Adding economic_context column...")
+                conn.execute("ALTER TABLE simulation_logs ADD COLUMN economic_context VARCHAR")
         except Exception as e:
             print(f"   ⚠️ Migration Warning: {e}")
 
@@ -93,7 +103,7 @@ class Journal:
         ))
         conn.close()
 
-    def log_event(self, timestamp, event_type, content):
+    def log_event(self, timestamp, event_type, content, micro_context=None, economic_context=None):
         """Log an LLM interaction or system event"""
         conn = get_connection()
         import json
@@ -101,10 +111,13 @@ class Journal:
             # Use default=str to handle non-serializable objects (time, datetime, etc.)
             content = json.dumps(content, default=str)
         
+        micro_str = json.dumps(micro_context, default=str) if micro_context else None
+        econ_str = json.dumps(economic_context, default=str) if economic_context else None
+        
         conn.execute("""
-            INSERT INTO simulation_logs (session_id, timestamp, event_type, content) 
-            VALUES (?, ?, ?, ?)
-        """, (self.session_id, timestamp, event_type, content))
+            INSERT INTO simulation_logs (session_id, timestamp, event_type, content, market_micro_context, economic_context) 
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (self.session_id, timestamp, event_type, content, micro_str, econ_str))
         conn.close()
 
     def register_session(self, symbol, start_date, end_date):

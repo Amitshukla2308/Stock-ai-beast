@@ -247,8 +247,24 @@ class BacktestMode(BaseMode):
                     "net_pnl": bal['net_pnl_rupees'],
                     "wipeouts": bal['wipeout_count']
                 }
-                
+            
             self._emit_telegram_event("SUMMARY", summary_payload, mode_tag="BACKTEST")
+            
+            # --- COUNTERFACTUAL ANALYSIS (Auto-run) ---
+            logger.info("\n🔬 COUNTERFACTUAL ANALYSIS")
+            logger.info("=" * 80)
+            try:
+                cf_results = self._run_counterfactual_analysis()
+                if cf_results:
+                    # Send to Telegram
+                    self._emit_telegram_event("COUNTERFACTUAL", cf_results, mode_tag="BACKTEST")
+                    logger.info("✅ Counterfactual analysis complete and sent to Telegram")
+                else:
+                    logger.info("⚠️  No counterfactual data available")
+            except Exception as cf_err:
+                logger.error(f"❌ Counterfactual analysis failed: {cf_err}")
+            logger.info("=" * 80 + "\n")
+            
             conn.close()
         except Exception as e:
             logger.error(f"   ❌ Final Reporting Error: {e}")
@@ -453,7 +469,7 @@ class BacktestMode(BaseMode):
         
         # Add Prev Close for Gap Analysis
         if context.get('daily_3'):
-            prev_close = context['daily_3'][-1]['c']
+            prev_close = context['daily_3'][0]['c'] # Index 0 is Yesterday (DESC)
             # Inject into the tick data for the prompt
             if first_tick:
                 first_tick['prev_close'] = prev_close
@@ -478,28 +494,12 @@ class BacktestMode(BaseMode):
         self.morning_brief = brief 
         self.journal.log_event(ts, "MORNING", brief)
         
-        # TELEGRAM NOTIFICATION
         self._emit_telegram_event("MORNING_BRIEF", {
             "date": ts.strftime('%Y-%m-%d'),
             "personality": brief.get('market_personality'),
             "bias": brief.get('primary_bias'),
             "plan": logic
         }, mode_tag="BACKTEST")
-
-        # --- EMIT LLM_TRACE (UPGRADE) ---
-        trace_payload = {
-            "llm_type": "MORNING",
-            "time": ts.strftime('%H:%M'),
-            "mode": "N/A",
-            "action": "N/A",
-            "confidence": 0.0,
-            "sl_points": None,
-            "target_points": None,
-            "reason": logic,
-            "engine_decision": "EXECUTED",
-            "engine_reason": None
-        }
-        self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag="BACKTEST")
 
     def trigger_tactical_update(self, tick):
         if isinstance(tick, pd.Series): tick = tick.to_dict()
@@ -531,15 +531,25 @@ class BacktestMode(BaseMode):
                     if exit_date == today_str:
                         day_pnl += t.get('pnl', 0)
             
-            instructions = self.brain.get_tactical_update(
-                tick, 
-                context=context,
-                plan=self.morning_brief,
-                current_pnl=current_pnl, 
-                open_position=self.hot_path.open_position,
-                day_pnl=day_pnl,
-                symbol=self.symbol
-            )
+            try:
+                instructions = self.brain.get_tactical_update(
+                    tick, 
+                    context=context,
+                    plan=self.morning_brief,
+                    current_pnl=current_pnl, 
+                    open_position=self.hot_path.open_position,
+                    day_pnl=day_pnl,
+                    symbol=self.symbol
+                )
+            except Exception as llm_err:
+                logger.error(f"   ❌ LLM TACTICAL CALL FAILED: {llm_err}")
+                import traceback
+                traceback.print_exc()
+                instructions = None
+            
+            if instructions is None:
+                logger.warning(f"   ⚠️ TACTICAL returned None at {tick['timestamp'].strftime('%H:%M')}")
+            
             if instructions:
                 # Inject pre-computed logic for Hot Path
                 instructions['atr'] = context.get('atr_14')
@@ -569,37 +579,43 @@ class BacktestMode(BaseMode):
                 print(f"      🔍 TRACE_DEBUG: Emitting TACTICAL LLM_TRACE at {tick['timestamp'].strftime('%H:%M')}")
                 
                 # --- EMIT LLM_TRACE (UPGRADE) ---
-                try:
-                    # Extract last 3 5-min candles for visibility
-                    today_5min = context.get('today_5min', [])
-                    last_3_candles = []
-                    if today_5min:
-                        for c in today_5min[-3:]:
-                            last_3_candles.append({
-                                't': c.get('ts', 'N/A')[-5:] if c.get('ts') else 'N/A',  # Just HH:MM
-                                'o': round(c.get('o', 0), 1),
-                                'h': round(c.get('h', 0), 1),
-                                'l': round(c.get('l', 0), 1),
-                                'c': round(c.get('c', 0), 1)
-                            })
-                    
-                    trace_payload = {
-                        "llm_type": "TACTICAL",
-                        "time": tick['timestamp'].strftime('%H:%M'),
-                        "tick_time": str(instructions.get('tick_time', 'N/A')),
-                        "mode": instructions.get('mode', 'UNKNOWN'),
-                        "action": instructions.get('action', 'HOLD'),
-                        "confidence": instructions.get('confidence', 0.0),
-                        "sl_points": instructions.get('sl_points'),
-                        "target_points": instructions.get('target_points'),
-                        "reason": instructions.get('technical_reason', instructions.get('reason', 'N/A')),
-                        "engine_decision": instructions.get('engine_decision', 'EXECUTED'),
-                        "engine_reason": instructions.get('engine_reason'),
-                        "last_3_candles": last_3_candles
-                    }
-                    self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag="BACKTEST")
-                except Exception as trace_err:
-                    print(f"      ❌ TACTICAL TRACE EMIT ERROR: {trace_err}")
+                # Only send if action is NOT HOLD to avoid Telegram rate limits (429)
+                action_for_trace = instructions.get('action', 'HOLD')
+                should_emit_trace = action_for_trace in ['BUY_CALL', 'BUY_PUT'] or instructions.get('gate_rejected')
+                
+                if should_emit_trace:
+                    try:
+                        # Extract last 3 5-min candles for visibility
+                        today_5min = context.get('today_5min', [])
+                        last_3_candles = []
+                        if today_5min:
+                            for c in today_5min[-3:]:
+                                last_3_candles.append({
+                                    't': c.get('ts', 'N/A')[-5:] if c.get('ts') else 'N/A',  # Just HH:MM
+                                    'o': round(c.get('o', 0), 1),
+                                    'h': round(c.get('h', 0), 1),
+                                    'l': round(c.get('l', 0), 1),
+                                    'c': round(c.get('c', 0), 1)
+                                })
+                        
+                        trace_payload = {
+                            "llm_type": "TACTICAL",
+                            "time": tick['timestamp'].strftime('%H:%M'),
+                            "tick_time": str(instructions.get('tick_time', 'N/A')),
+                            "mode": instructions.get('mode', 'UNKNOWN'),
+                            "selected_style": instructions.get('selected_style', 'NONE'),
+                            "action": action_for_trace,
+                            "confidence": instructions.get('confidence', 0.0),
+                            "sl_points": instructions.get('sl_points'),
+                            "target_points": instructions.get('target_points'),
+                            "reason": instructions.get('technical_reason', instructions.get('reason', 'N/A')),
+                            "engine_decision": instructions.get('engine_decision', 'EXECUTED'),
+                            "engine_reason": instructions.get('engine_reason'),
+                            "last_3_candles": last_3_candles
+                        }
+                        self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag="BACKTEST")
+                    except Exception as trace_err:
+                        print(f"      ❌ TACTICAL TRACE EMIT ERROR: {trace_err}")
                 
                 # --- EMIT EXCEPTIONAL GATE REJECTION (if applicable) ---
                 if instructions.get('gate_rejected'):
@@ -703,3 +719,81 @@ class BacktestMode(BaseMode):
         self.morning_brief = None
         self.hot_path.active_instructions = {}  # Clear pending instructions
         # Note: open_position should already be None from 15:15 square-off
+
+    def _run_counterfactual_analysis(self):
+        """
+        Run counterfactual analysis to measure impact of each decision type.
+        Returns formatted results for Telegram notification.
+        """
+        from counterfactual_truth import CounterfactualAnalyzer
+        
+        try:
+            analyzer = CounterfactualAnalyzer('data/trading.db', self.session_id)
+            
+            # Run all analyses
+            time_exits = analyzer.analyze_time_based_exits()
+            blocked = analyzer.analyze_blocked_trades()
+            modifications = analyzer.analyze_engine_modifications()
+            smart_exits = analyzer.analyze_ai_smart_exits()
+            opening_range = analyzer.analyze_opening_range()
+            exceptional_gate = analyzer.analyze_exceptional_gate()
+            
+            # Calculate metrics
+            time_saved = sum(-r['diff'] for r in time_exits if r['diff'] < 0)
+            time_lost = sum(r['diff'] for r in time_exits if r['diff'] > 0)
+            time_net = sum(-r['diff'] for r in time_exits)
+            
+            blocked_pnl = sum(r['pnl'] for r in blocked)
+            blocked_wr = (sum(1 for r in blocked if r['pnl'] > 0) / len(blocked) * 100) if blocked else 0
+            
+            mod_benefit = sum(r['benefit'] for r in modifications)
+            smart_benefit = sum(r['diff'] for r in smart_exits)
+            or_pnl = opening_range['removed_pnl']
+            late_pnl = sum(r['pnl'] for r in exceptional_gate)
+            
+            # Format result for Telegram
+            result = {
+                "time_exits": {
+                    "saved": round(time_saved, 1),
+                    "lost": round(time_lost, 1),
+                    "net": round(time_net, 1),
+                    "count": len(time_exits)
+                },
+                "blocked_trades": {
+                    "hypothetical_pnl": round(blocked_pnl, 1),
+                    "win_rate": round(blocked_wr, 1),
+                    "count": len(blocked)
+                },
+                "engine_mods": {
+                    "benefit": round(mod_benefit, 1),
+                    "count": len(modifications)
+                },
+                "smart_exits": {
+                    "benefit": round(smart_benefit, 1),
+                    "count": len(smart_exits)
+                },
+                "opening_range": {
+                    "net_pnl": round(or_pnl, 1),
+                    "count": opening_range['removed_count']
+                },
+                "late_session_gate": {
+                    "hypothetical_pnl": round(late_pnl, 1),
+                    "count": len(exceptional_gate)
+                }
+            }
+            
+            # Log to console
+            logger.info(f"  Time-Based Exits: Saved {time_saved:.1f}, Lost {time_lost:.1f}, Net {time_net:+.1f}pts ({len(time_exits)} trades)")
+            logger.info(f"  Blocked Trades: Would have made {blocked_pnl:+.1f}pts @ {blocked_wr:.0f}% WR ({len(blocked)} signals)")
+            logger.info(f"  Engine Modifications: Benefit {mod_benefit:+.1f}pts ({len(modifications)} trades)")
+            logger.info(f"  AI Smart Exits: Benefit {smart_benefit:+.1f}pts ({len(smart_exits)} trades)")
+            logger.info(f"  Opening Range: Net {or_pnl:+.1f}pts ({opening_range['removed_count']} trades)")
+            logger.info(f"  Late Session Gate: Would have made {late_pnl:+.1f}pts ({len(exceptional_gate)} signals)")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Counterfactual analysis error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None

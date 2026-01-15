@@ -212,48 +212,28 @@ def ensure_data_v2(symbol, days=5, resolution="5", table_name="candles_5min", st
     if sync_start_date:
         print(f"      📥 Fetching range: {sync_start_date.date()} ➡ {effective_end.date()} ...")
         
-        # We can fetch this in one go (Fyers handles pagination usually, but let's stick to chunk loop for safety)
-        # Actually fetch_history takes start/end. Let's do a loop to be safe with large ranges.
-        
-        chunk_size = 1 if resolution == "1" else 30
-        loop_date = sync_start_date
+        # Fetch entire range in ONE call for efficiency
         total_added = 0
+        candles = fetch_history(fyers, symbol, sync_start_date, effective_end, resolution)
         
-        while loop_date < effective_end:
-            # Handle standard chunking
-            chunk_end = min(loop_date + timedelta(days=chunk_size), effective_end)
+        if candles:
+            df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['symbol'] = symbol
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
             
-            # Special logic: If chunk_end == loop_date (small diff), force at least some advance or break
-            if chunk_end <= loop_date: 
-                 chunk_end = loop_date + timedelta(days=1)
+            rows_to_insert = []
+            for _, row in df.iterrows():
+                rows_to_insert.append((
+                    row['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), 
+                    row['symbol'], 
+                    row['open'], row['high'], row['low'], row['close'], row['volume']
+                ))
 
-            if resolution == "1":
-                print(f"      ⏳ {loop_date.date()}...", end="\r")
-
-            candles = fetch_history(fyers, symbol, loop_date, chunk_end, resolution)
-            
-            if candles:
-                df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['symbol'] = symbol
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                
-                rows_to_insert = []
-                for _, row in df.iterrows():
-                    rows_to_insert.append((
-                        row['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), 
-                        row['symbol'], 
-                        row['open'], row['high'], row['low'], row['close'], row['volume']
-                    ))
-
-                try:
-                    conn.executemany(f"INSERT OR IGNORE INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?)", rows_to_insert)
-                    total_added += len(rows_to_insert)
-                except Exception as e:
-                    print(f"   ⚠️ Insert Error: {e}")
-            
-            # Move Next
-            loop_date = chunk_end 
-            time.sleep(0.2 if resolution == "1" else 0.1) 
+            try:
+                conn.executemany(f"INSERT OR IGNORE INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?)", rows_to_insert)
+                total_added += len(rows_to_insert)
+            except Exception as e:
+                print(f"   ⚠️ Insert Error: {e}")
     else:
         print(f"      ✨ All data present and up-to-date. Skipping.") 
     

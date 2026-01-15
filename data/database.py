@@ -183,6 +183,7 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
     # print(f"      🔍 DB Context Fetch for {ts_utc} UTC")
     
     # 1. Daily Aggregation (Last 3 Full days before current timestamp)
+    # Added: limit scan to last 30 days to avoid full table scan
     daily_query = """
         WITH daily AS (
             SELECT 
@@ -193,13 +194,15 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
                 last(close) as close,
                 sum(volume) as volume
             FROM candles_1min 
-            WHERE symbol = ? AND timestamp < ?
+            WHERE symbol = ? 
+              AND timestamp < ?
+              AND timestamp > ? - INTERVAL '30 days'
             GROUP BY 1
         )
-        SELECT * FROM daily ORDER BY date DESC LIMIT 3
+        SELECT * FROM daily ORDER BY date DESC LIMIT 6
     """
     
-    # 2. Last 14 15-min Candles
+    # 2. Last 14 15-min Candles (limited to last 7 days for performance)
     intraday_15min_query = """
         SELECT 
             time_bucket(INTERVAL '15 minutes', timestamp) AS ts,
@@ -209,10 +212,12 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
             last(close) as close,
             sum(volume) as volume
         FROM candles_1min
-        WHERE symbol = ? AND timestamp <= ?
+        WHERE symbol = ? 
+          AND timestamp <= ?
+          AND timestamp > ? - INTERVAL '7 days'
         GROUP BY 1
         ORDER BY ts DESC 
-        LIMIT 20
+        LIMIT 60
     """
 
     # 3. Today's 5-min Candles (Aggregated from 1min)
@@ -250,9 +255,9 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
     """
     
     try:
-        daily_rows = conn.execute(daily_query, (symbol, ts_utc)).fetchall()
+        daily_rows = conn.execute(daily_query, (symbol, ts_utc, ts_utc)).fetchall()
         # 15min rows needs simple query
-        last_15min_rows = conn.execute(intraday_15min_query, (symbol, ts_utc)).fetchall()
+        last_15min_rows = conn.execute(intraday_15min_query, (symbol, ts_utc, ts_utc)).fetchall()
         # Today 5min
         today_5min_rows = conn.execute(today_5min_query, (symbol, ts_utc, ts_utc)).fetchall()
         # Today 15min (for tactical decisions)
@@ -283,19 +288,25 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
                 prev_close = prev[4]
                 # True Range = max(H-L, |H-PrevClose|, |L-PrevClose|)
                 tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-                true_ranges.append(tr)
+            true_ranges.append(tr)
             # ATR = average of last 14 true ranges
             atr_14 = round(sum(true_ranges[-14:]) / 14, 2)
         
-        # 2. Current Range (High-Low of last 3 15-min candles of today)
-        current_range = None
-        vol_ratio = 100.0
+        # 2. Today's Statistics (Total Session)
+        day_high = None
+        day_low = None
+        if today_5min_rows:
+            day_high = max(r[2] for r in today_5min_rows)
+            day_low = min(r[3] for r in today_5min_rows)
+        
+        # Recent Range (Last 45 mins)
+        recent_range = 0
         if today_15min_rows:
             # Use last 3 (or fewer if early in day) 15-min candles
             recent_15min = today_15min_rows[-3:] if len(today_15min_rows) >= 3 else today_15min_rows
             range_high = max(r[2] for r in recent_15min)  # Highest high
             range_low = min(r[3] for r in recent_15min)   # Lowest low
-            current_range = round(range_high - range_low, 2)
+            recent_range = round(range_high - range_low, 2)
         
         # 3. Last 2 5-min closes for breakout confirmation
         last_2_5min_closes = []
@@ -305,6 +316,7 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
             last_2_5min_closes = [today_5min_rows[-1][4]]
             
         # Volume SMA Ratio (Last 10 5-min candles)
+        vol_ratio = 100.0
         if today_5min_rows:
             last_tick = today_5min_rows[-1]
             if len(today_5min_rows) >= 10:
@@ -316,11 +328,14 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
         # 4. Relative Volatility (ATR as % of price)
         vol_regime = "NORMAL"
         volatility_pct = 0.0
-        if atr_14 and today_5min_rows:
+        # The daily_rows are ordered DESC, so index 0 is yesterday's close
+        if daily_rows and atr_14 and today_5min_rows:
+            prev_close = daily_rows[0][4] # Index 0 is Yesterday's Close (DESC)
             price = today_5min_rows[-1][4]
-            volatility_pct = (atr_14 / price) * 100
-            if volatility_pct < 0.05: vol_regime = "LOW"
-            elif volatility_pct > 0.15: vol_regime = "HIGH"
+            if prev_close and price: # Ensure prev_close is not None or 0
+                volatility_pct = (atr_14 / float(prev_close)) * 100 # Use prev_close as base
+                if volatility_pct < 0.05: vol_regime = "LOW"
+                elif volatility_pct > 0.15: vol_regime = "HIGH"
         
         def to_ist(dt):
             if dt is None: return None
@@ -330,25 +345,27 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
 
         context = {
             'daily_3': [
-                {'date': str(r[0]), 'o': r[1], 'h': r[2], 'l': r[3], 'c': r[4]} 
-                for r in daily_rows[::-1] 
+                {'date': str(r[0]), 'o': r[1], 'h': r[2], 'l': r[3], 'c': r[4], 'volume': r[5]} 
+                for r in daily_rows # index 0 = Yesterday
             ],
             'last_15min': [
-                {'ts': to_ist(r[0]), 'o': r[1], 'h': r[2], 'l': r[3], 'c': r[4]}
+                {'ts': to_ist(r[0]), 'o': r[1], 'h': r[2], 'l': r[3], 'c': r[4], 'volume': r[5]}
                 for r in last_15min_rows[::-1] 
             ],
             'today_5min': [
-                {'ts': to_ist(r[0]), 'o': r[1], 'h': r[2], 'l': r[3], 'c': r[4]}
+                {'ts': to_ist(r[0]), 'o': r[1], 'h': r[2], 'l': r[3], 'c': r[4], 'volume': r[5]}
                 for r in today_5min_rows
             ],
             'today_15min': [
-                {'ts': to_ist(r[0]), 'o': r[1], 'h': r[2], 'l': r[3], 'c': r[4]}
+                {'ts': to_ist(r[0]), 'o': r[1], 'h': r[2], 'l': r[3], 'c': r[4], 'volume': r[5]}
                 for r in today_15min_rows
             ],
             'vix_spot': vix_spot,
             'vix_pct': vix_pct,
             'atr_14': atr_14,
-            'current_range': current_range,
+            'day_high': day_high,
+            'day_low': day_low,
+            'current_range': recent_range,
             'vol_ratio': vol_ratio,
             'vol_regime': vol_regime,
             'last_2_5min_closes': last_2_5min_closes

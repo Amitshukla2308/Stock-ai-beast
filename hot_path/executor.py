@@ -179,9 +179,12 @@ class HotPathExecutor:
         morning_bias = instructions.get('morning_bias', 'NEUTRAL')
         pivot = instructions.get('pivot', 0)
         
+        bias_strength = instructions.get('bias_strength', 'STRONG')
+        
         bias_align = (action == "BUY_CALL" and morning_bias == "BULLISH") or \
                      (action == "BUY_PUT" and morning_bias == "BEARISH") or \
-                     (morning_bias == "NEUTRAL")
+                     (morning_bias == "NEUTRAL") or \
+                     (bias_strength == "FRAGILE") # Phase-2: Fragile bias allows micro context to lead
         
         struct_align = False
         highs = self.day_structure['highs']
@@ -266,24 +269,19 @@ class HotPathExecutor:
                 self.active_instructions = instructions
                 return
 
-        # 2. BIAS GATING: (Already handled by Prompt v4.0 logic)
-        # We only apply manual penalties if the LLM failed to follow bias alignment
-        if morning_bias == "BULLISH" and action == "BUY_PUT":
-            final_confidence *= 0.5
-            instructions['engine_decision'] = "MODIFIED"
-            instructions['engine_reason'] = "Bias Penalty (against BULLISH bias)"
-        elif morning_bias == "BEARISH" and action == "BUY_CALL":
-            final_confidence *= 0.5
-            instructions['engine_decision'] = "MODIFIED"
-            instructions['engine_reason'] = "Bias Penalty (against BEARISH bias)"
+        # 2. BIAS GATING: (PHASE-2 Correction)
+        # We NO LONGER apply manual 0.5x penalties here. 
+        # The Brain prompt handles confidence derivation based on satisfied conditions.
+        pass
 
         # 3. CONFIDENCE THRESHOLD (Reconciled with Prompts)
-        # OPENING_RANGE = 0.50 (mean reversion, tight SLs)
-        # STRUCTURE     = 0.65 (trend trades, wider risk)
-        # Prompts are aligned to these values intentionally.
+        # Style-specific hard gates
+        selected_style = instructions.get('selected_style', 'NONE')
         mode = instructions.get('mode', 'UNKNOWN')
-        threshold = 0.50 # Default
-        if mode == 'OPENING_RANGE':
+        
+        if selected_style == 'REMR':
+            threshold = 0.45
+        elif mode == 'OPENING_RANGE':
             threshold = 0.50
         elif mode == 'STRUCTURE':
             threshold = 0.65
@@ -559,17 +557,24 @@ class HotPathExecutor:
             pos_side = pos['side']
             
             # Standard AI exit signals
+            conf = self.active_instructions.get('confidence', 0)
             if (pos_side == 'CALL' and ai_action == Action.EXIT_CALL.value) or \
                (pos_side == 'PUT' and ai_action == Action.EXIT_PUT.value):
-                self.square_off(price, timestamp, reason=ExitReason.AI_EXIT.value)
-                return
+                if conf >= 0.8:
+                    self.square_off(price, timestamp, reason=ExitReason.AI_EXIT.value)
+                    return
+                else:
+                    print(f"      ⏸️  AI EXIT suppressed: confidence {conf:.2f} < 0.8")
             
             # NEW: LLM Smart Exit - immediate exit on detected reversal
             if ai_action == Action.EXIT_NOW.value:
-                reason_text = self.active_instructions.get('adjustment_reason', 'Reversal detected')
-                print(f"      🧠 AI SMART EXIT: {reason_text}")
-                self.square_off(price, timestamp, reason=ExitReason.AI_SMART_EXIT.value)
-                return
+                if conf >= 0.8:
+                    reason_text = self.active_instructions.get('adjustment_reason', 'Reversal detected')
+                    print(f"      🧠 AI SMART EXIT: {reason_text} (Conf: {conf:.2f})")
+                    self.square_off(price, timestamp, reason=ExitReason.AI_SMART_EXIT.value)
+                    return
+                else:
+                    print(f"      ⏸️  AI SMART EXIT suppressed: confidence {conf:.2f} < 0.8")
             
             # NEW: LLM SL Adjustment - only allow tightening (towards profit)
             if ai_action == Action.ADJUST_SL.value:
@@ -668,8 +673,6 @@ class HotPathExecutor:
         print(f"      🚀 EXECUTION: Entered {side} at {price}")
         self.total_trades_today += 1
         
-        range_current = self.active_instructions.get('range', 50)  # Get range for trailing
-        
         self.open_position = {
             'side': side,
             'entry_price': price,
@@ -677,14 +680,10 @@ class HotPathExecutor:
             'sl': self.active_instructions.get('sl'),
             'target': self.active_instructions.get('target'),
             'max_hold_minutes': self.active_instructions.get('max_hold_minutes', 30),
-            # Trailing SL fields
-            'peak_price': price,          # Track best price reached
-            'range': range_current,       # For dynamic trail calculation
-            'breakeven_set': False,       # Flag: SL moved to breakeven
-            'profit_locked': False,       # Flag: Locked +20 pts
-            # Fidelity Metrics
+            # Phase-2: Tracking metrics only (no automatic adjustments)
+            'peak_price': price,
             'max_pnl': 0.0,
-            'positive_pnls': []           # List of positive PnL ticks
+            'positive_pnls': []
         }
         
         entry_signal = {
@@ -734,7 +733,7 @@ class HotPathExecutor:
         if unrealized_pnl > pos['max_pnl']:
             pos['max_pnl'] = unrealized_pnl
         
-        # === ADVANCED TRAILING SYSTEM ===
+        # Phase-2: Static SL/Target System
         entry_price = pos['entry_price']
         original_target_dist = pos.get('original_target_dist')
         
@@ -751,26 +750,8 @@ class HotPathExecutor:
         if original_target_dist and original_target_dist > 0:
             target_progress = (unrealized_pnl / original_target_dist) * 100
         
-        # === SIMPLE SL ADJUSTMENT: At 60% of target, move SL to lock 50% ===
-        # No continuous trailing, just one adjustment at the 60% milestone
-        if target_progress >= 60 and not pos.get('sl_adjusted'):
-            # Calculate 50% of target distance
-            locked_profit = int(original_target_dist * 0.5)
-            
-            if pos['side'] == 'CALL':
-                new_sl = entry_price + locked_profit
-                if sl is None or new_sl > sl:
-                    pos['sl'] = self._round_to_tick(new_sl)
-                    pos['sl_adjusted'] = True
-                    sl = pos['sl']
-                    print(f"      🔒 60% REACHED → SL to +{locked_profit}pts (SL→{sl:.1f})")
-            else:  # PUT
-                new_sl = entry_price - locked_profit
-                if sl is None or new_sl < sl:
-                    pos['sl'] = self._round_to_tick(new_sl)
-                    pos['sl_adjusted'] = True
-                    sl = pos['sl']
-                    print(f"      🔒 60% REACHED → SL to +{locked_profit}pts (SL→{sl:.1f})")
+        # Phase-2: NO TRAILING STOPS
+        # SL and Target are static from entry, managed only by LLM tactical updates
         
         # Log position status every candle
         pnl_color = "🟢" if unrealized_pnl >= 0 else "🔴"
