@@ -65,12 +65,17 @@ def get_engine(mode, args=None):
 
             print(f"\n<<<TELEGRAM STATUS>>> {{\"msg\": \"⏳ Prefilling Data for {symbol} ({days} days)...\"}} <<<END>>>\n")
             from data.prefill import run as run_prefill
+            
+            # Smart Resolution Choice: Use 5-min for multi-year, 1-min for short term
+            res = "5"
+            if days > 100: res = "5" # Force 5min for speed on large ranges
+            
             run_prefill(
                 days=days, 
                 symbol=symbol, 
-                resolution="1", 
-                start_date=start_date if 'start_date' in locals() else None,
-                end_date=end_date if 'end_date' in locals() else None
+                resolution=res, 
+                start_date=start_date,
+                end_date=end_date
             )
             print(f"\n<<<TELEGRAM STATUS>>> {{\"msg\": \"✅ Data Ready. Starting Simulation...\"}} <<<END>>>\n")
             

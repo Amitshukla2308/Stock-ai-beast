@@ -2,6 +2,7 @@ import argparse
 import subprocess
 import time
 import sys
+from brokers.fyers.auth import FyersAuth
 
 def run_command(command):
     try:
@@ -19,6 +20,16 @@ def kill_existing():
     time.sleep(1)
 
 def trigger(mode, days, debug, symbol="NIFTY", start_date=None, end_date=None, balance=30000, **kwargs):
+    # --- 1. SMART LOGIN CHECK ---
+    print("🔐 Checking Fyers Authentication...")
+    if not FyersAuth.validate_token():
+        print("⚠️ Token Expired or Missing. Initiating Login...")
+        if not FyersAuth.authenticate():
+            print("❌ Login Failed. Aborting.")
+            return
+    else:
+        print("✅ Auth Valid.")
+
     kill_existing()
     print(f"🔥 Triggering Mode: {mode.upper()} for {symbol}")
 

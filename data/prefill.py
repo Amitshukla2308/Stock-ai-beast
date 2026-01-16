@@ -130,6 +130,8 @@ def run(days=5, symbol="BANKNIFTY", resolution="5", start_date=None, end_date=No
     table_name = "candles_5min"
     if resolution == "1":
         table_name = "candles_1min"
+    elif resolution == "1D" or resolution == "D":
+        table_name = "candles_1day"
     elif "VIX" in fyers_symbol:
         table_name = "candles_vix"
         
@@ -168,7 +170,7 @@ def ensure_data_v2(symbol, days=5, resolution="5", table_name="candles_5min", st
     if diff_days < 1: diff_days = 1
 
     # Optimization: Check if we have enough data (NSE: ~375 ticks/day for 1m, ~75 for 5m)
-    ticks_per_day = 375 if resolution == "1" else 75
+    ticks_per_day = 375 if resolution == "1" else (75 if resolution != "1D" and resolution != "D" else 1)
     expected_min = diff_days * (ticks_per_day * 0.7) # 70% threshold
     
     count_query = f"SELECT count(*) FROM {table_name} WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?"
@@ -212,28 +214,49 @@ def ensure_data_v2(symbol, days=5, resolution="5", table_name="candles_5min", st
     if sync_start_date:
         print(f"      📥 Fetching range: {sync_start_date.date()} ➡ {effective_end.date()} ...")
         
-        # Fetch entire range in ONE call for efficiency
-        total_added = 0
-        candles = fetch_history(fyers, symbol, sync_start_date, effective_end, resolution)
-        
-        if candles:
-            df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['symbol'] = symbol
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+        # --- CHUNKED FETCHING IMPLEMENTATION ---
+        # Fyers Limit: 100 days for intraday. We use 90 to be safe.
+        # For Daily (1D), limit is 366 days. We use 360.
+        chunk_days = 90
+        if resolution == "1D" or resolution == "D":
+            chunk_days = 360
             
-            rows_to_insert = []
-            for _, row in df.iterrows():
-                rows_to_insert.append((
-                    row['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), 
-                    row['symbol'], 
-                    row['open'], row['high'], row['low'], row['close'], row['volume']
-                ))
+        current_chunk_start = sync_start_date
+        total_added = 0
+        
+        while current_chunk_start < effective_end:
+            # Calculate chunk end (min of chunk size or overall end)
+            current_chunk_end = min(current_chunk_start + timedelta(days=chunk_days), effective_end)
+            
+            # print(f"         Fetching chunk: {current_chunk_start.date()} -> {current_chunk_end.date()}") # Debug
+            
+            candles = fetch_history(fyers, symbol, current_chunk_start, current_chunk_end, resolution)
+            
+            if candles:
+                df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['symbol'] = symbol
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                
+                rows_to_insert = []
+                for _, row in df.iterrows():
+                    rows_to_insert.append((
+                        row['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), 
+                        row['symbol'], 
+                        row['open'], row['high'], row['low'], row['close'], row['volume']
+                    ))
 
-            try:
-                conn.executemany(f"INSERT OR IGNORE INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?)", rows_to_insert)
-                total_added += len(rows_to_insert)
-            except Exception as e:
-                print(f"   ⚠️ Insert Error: {e}")
+                try:
+                    conn.executemany(f"INSERT OR IGNORE INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?)", rows_to_insert)
+                    total_added += len(rows_to_insert)
+                except Exception as e:
+                    print(f"   ⚠️ Insert Error: {e}")
+            
+            # Move to next chunk (ensure no overlap or gap? Fyers range_to is inclusive usually, but let's just add 1 sec or strict days)
+            # Fyers history API usually handles dates. 
+            # If we requested 2023-01-01 to 2023-01-30, next should be 2023-01-31
+            current_chunk_start = current_chunk_end + timedelta(days=1)
+            time.sleep(0.1) # Rate limit politeness
+            
     else:
         print(f"      ✨ All data present and up-to-date. Skipping.") 
     

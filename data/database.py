@@ -100,6 +100,20 @@ def init_db():
             PRIMARY KEY (timestamp, symbol)
         )
     """)
+
+    # 1-day candles table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS candles_1day (
+            timestamp TIMESTAMP,
+            symbol VARCHAR,
+            open FLOAT,
+            high FLOAT,
+            low FLOAT,
+            close FLOAT,
+            volume BIGINT,
+            PRIMARY KEY (timestamp, symbol)
+        )
+    """)
     
     # Features table
     conn.execute("""
