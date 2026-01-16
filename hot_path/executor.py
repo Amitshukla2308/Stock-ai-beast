@@ -680,6 +680,10 @@ class HotPathExecutor:
             'sl': self.active_instructions.get('sl'),
             'target': self.active_instructions.get('target'),
             'max_hold_minutes': self.active_instructions.get('max_hold_minutes', 30),
+            # Phase-2.5: Style Transition State
+            'style': self.active_instructions.get('selected_style', 'NONE'),
+            'expected_move_high': self.active_instructions.get('expected_move_high', 0),
+            'micro_context': self.active_instructions.get('micro_context', {}),
             # Phase-2: Tracking metrics only (no automatic adjustments)
             'peak_price': price,
             'max_pnl': 0.0,
@@ -750,7 +754,75 @@ class HotPathExecutor:
         if original_target_dist and original_target_dist > 0:
             target_progress = (unrealized_pnl / original_target_dist) * 100
         
-        # Phase-2: NO TRAILING STOPS
+        # Phase-2.5: STYLE TRANSITION LOGIC (REMR -> ITC)
+        # Check if "Reaction Has Matured" and upgrade blindly holding REMR to Trend Following ITC
+        style = pos.get('style')
+        if style == 'REMR' or style == 'RANGE_EXTREME_MEAN_REVERSION':
+            em_high = pos.get('expected_move_high', 0)
+            micro = pos.get('micro_context', {})
+            
+            # Use cached micro context from entry (conservative) or could fetch fresh if available
+            # NOTE: We use cached for simplicity as `micro_context` in executor isn't updated every tick.
+            # Ideally calling `update_instructions` refreshes this, but `manage_position` runs between updates.
+            # However, `StyleTransition.md` says "evaluated every bar". 
+            # Since we don't calculate micro context inside executor (it's in Brain/Enrichment), we use 
+            # the values from the LAST tactical update instruction which refreshes `open_position` metadata?
+            # Actually, `open_position` is set ONCE at entry. We need to update its context from tactical updates.
+            # But `update_instructions` doesn't currently update `open_position` metadata.
+            # FIX: We will rely on price action triggers primarily here.
+            
+            # Dynamic triggers
+            impulse_ok = micro.get('impulse_detected', False) # From entry snapshot (approx)
+            fta_veto = micro.get('failure_to_accept', False)  # From entry snapshot
+            
+            # Check price threshold (0.6 * EM)
+            matured = False
+            if pos['side'] == 'CALL':
+                 if unrealized_pnl >= 0.6 * em_high: matured = True
+            else:
+                 if unrealized_pnl >= 0.6 * em_high: matured = True
+            
+            # Transition Guard
+            if matured and not fta_veto and impulse_ok:
+                print(f"      🦋 STYLE TRANSITION: REMR → ITC (Matured > {0.6*em_high:.1f}pts)")
+                
+                # 1. Update Style
+                pos['style'] = 'INTRADAY_TREND_CONTINUATION'
+                
+                # 2. Expand Target
+                impulse_move = micro.get('impulse_move_pts', 0)
+                expansion_pts = max(em_high * 2, impulse_move * 1.2)
+                
+                old_target = pos.get('target')
+                if pos['side'] == 'CALL':
+                    new_target = self._round_to_tick(entry_price + expansion_pts)
+                    if new_target > old_target:
+                        pos['target'] = new_target
+                        print(f"      📈 TGT Expanded: {old_target} → {new_target} (ITC Mode)")
+                else:
+                    new_target = self._round_to_tick(entry_price - expansion_pts)
+                    if new_target < old_target:
+                        pos['target'] = new_target
+                        print(f"      📉 TGT Expanded: {old_target} → {new_target} (ITC Mode)")
+
+                # 3. Update SL (Lock in risk)
+                # Rule: max(entry + 0.2 * EM, entry) -> Ensuring at least BE+
+                lock_in_pts = 0.2 * em_high
+                
+                old_sl = pos.get('sl')
+                if pos['side'] == 'CALL':
+                    new_sl = self._round_to_tick(entry_price + lock_in_pts)
+                    # Ensure we don't loosen SL if it was somehow already tighter (unlikely for REMR)
+                    if new_sl > old_sl: 
+                        pos['sl'] = new_sl
+                        print(f"      🛡️ SL Tightened: {old_sl} → {new_sl} (Locked 20% EM)")
+                else:
+                    new_sl = self._round_to_tick(entry_price - lock_in_pts)
+                    if new_sl < old_sl:
+                        pos['sl'] = new_sl
+                        print(f"      🛡️ SL Tightened: {old_sl} → {new_sl} (Locked 20% EM)")
+
+        # Phase-2: NO TRAILING STOPS (Except via Style Transition or LLM)
         # SL and Target are static from entry, managed only by LLM tactical updates
         
         # Log position status every candle

@@ -429,15 +429,18 @@ Evaluate BIAS FITNESS (was the bias useful, not just 'right'), EDGE SOURCE, and 
   },
   "primary_edge_source": "MICRO_STRUCTURE|TIME_DISCIPLINE|BIAS_DIRECTION|ECONOMIC_ASYMMETRY|NONE",
   "discipline_effectiveness": "POSITIVE|NEUTRAL|NEGATIVE",
-  "what_worked": [
-    {"event": "<trade or decision>", "reason": "<why it worked>"}
+  "what_went_well": [
+    {"event": "<trade or decision>", "lesson": "<why it worked>"}
   ],
-  "what_failed": [
-    {"event": "<trade or decision>", "cause": "<systemic cause: LOCATION_ERROR|BIAS_OVERREACH|etc>"}
+  "what_went_wrong": [
+    {"event": "<trade or decision>", "lesson": "<cause: LOCATION_ERROR|BIAS_OVERREACH|etc>"}
   ],
+  "nugget_good": "<Key pattern to REINFORCE (Good Nugget)>",
+  "nugget_bad": "<Key pattern to AVOID (Bad Nugget)>",
+  "dataset_nugget": "<The single most important lesson for the RAG database>",
+  "audit_summary": "<Executive summary of the day>",
   "root_cause_of_losses": "LOCATION_ERROR|MICRO_STRUCTURE_MISREAD|BIAS_OVERREACH|ECONOMIC_MISJUDGMENT|EXECUTION_NOISE|NONE",
   "exit_quality": "GOOD|MIXED|POOR",
-  "system_lesson": "<one sentence strictly for logic improvement>",
   "next_day_guidance": "<risk-focused guidance>"
 }
 """

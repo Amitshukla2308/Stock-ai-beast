@@ -589,6 +589,14 @@ class LLMClient:
                     data['action'] = "BUY_CALL"
                     data['reason'] = f"(Guard Flipped) {data['reason']}"
             
+            # --- PHASE-2.5: SINGLE POSITION GUARD (Anti-Pyramiding) ---
+            # If we are already in a position, BLOCKED any new Entry signals.
+            # This prevents LLM hallucinations from confusing the user or logs.
+            if open_position and data['action'] in ['BUY_CALL', 'BUY_PUT']:
+                logger.warning(f"      🛡️ Position Guard: Blocked {data['action']} because position is already OPEN.")
+                data['action'] = "HOLD"
+                data['reason'] = f"(System Fixed) Invalid Entry Signal while Position Open."
+            
             # --- CALCULATION (EXISTING LOGIC) ---
             
             # Entry Price
@@ -640,6 +648,15 @@ class LLMClient:
             data['sl_points'] = sl_points
             data['target_points'] = tgt_points
             
+            # --- PHASE-2.5: STYLE TRANSITION CONTEXT INJECTION ---
+            # Inject primitives needed for REMR -> ITC transition logic in Executor
+            data['micro_context'] = {
+                'impulse_detected': micro_context.get('impulse_detected', False),
+                'failure_to_accept': micro_context.get('failure_to_accept', False),
+                'impulse_move_pts': micro_context.get('impulse_move_pts', 0.0)
+            }
+            data['expected_move_high'] = em_envelope.get('expected_move_high', 0)
+
             # Log AFTER all normalizations are applied
             reason_short = reason[:40] + '...' if len(reason) > 40 else reason
             logger.info(f"      🔸 {action} | Mode:{data['mode']} | Entry:{entry:.1f} | SL:{data['sl']} (-{sl_points:.1f}) | TGT:{data['target']} (+{tgt_points:.1f}) | {reason_short}")

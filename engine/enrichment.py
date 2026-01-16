@@ -265,6 +265,7 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
     # 6. FAILURE_TO_ACCEPT (ITC Veto - Canonical)
     failure_to_accept = False
     impulse_detected = False
+    i_move = 0.0
     if or_range > 0 and len(bars_15min) >= 15:
         window_15 = bars_15min[-15:]
         i_low = min(b['l'] for b in window_15)
@@ -326,7 +327,8 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
         "weak_follow_through": weak_follow_through,
         "rejection": rejection,
         "failure_to_accept": failure_to_accept,
-        "impulse_detected": impulse_detected
+        "impulse_detected": impulse_detected,
+        "impulse_move_pts": round(i_move, 2) if impulse_detected else 0.0
     }
 
 def calculate_opening_range(today_5min):

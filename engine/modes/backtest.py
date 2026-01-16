@@ -13,7 +13,7 @@ UTC = pytz.utc
 logger = logging.getLogger(__name__)
 
 # Constants for balance calculation
-PTS_TO_RUPEES = 27.5  # 1 NIFTY pt = ₹27.5 (50 qty × 0.55 delta)
+PTS_TO_RUPEES = 35.75  # 1 NIFTY pt = ₹35.75 (65 qty × 0.55 delta)
 MARGIN_PER_LOT = 10000  # ₹10,000 required to hold 1 lot
 
 class BalanceMonitor:
@@ -21,6 +21,7 @@ class BalanceMonitor:
     
     def __init__(self, initial_balance=30000):
         self.initial_balance = initial_balance
+        self.total_deposited = initial_balance # Initial deposit
         self.current_balance = initial_balance
         self.wipeout_count = 0
         self.balance_history = []  # [(timestamp, balance)]
@@ -29,6 +30,8 @@ class BalanceMonitor:
     def update_balance(self, pnl_pts, timestamp=None):
         """Update balance after a trade. PnL in points (NIFTY)."""
         rupee_pnl = pnl_pts * PTS_TO_RUPEES
+        
+        # Determine actual PnL outcome
         self.current_balance += rupee_pnl
         self.trade_count += 1
         
@@ -43,8 +46,13 @@ class BalanceMonitor:
         if self.current_balance < MARGIN_PER_LOT:
             self.wipeout_count += 1
             old_balance = self.current_balance
+            
+            # Injection logic: Restore to Initial Balance
+            injection_amount = self.initial_balance - self.current_balance
+            self.total_deposited += injection_amount
+            
             self.current_balance = self.initial_balance
-            logger.info(f"      💀 WIPEOUT #{self.wipeout_count}! Balance ₹{old_balance:.0f} < ₹{MARGIN_PER_LOT} → Reset to ₹{self.initial_balance}")
+            logger.info(f"      💀 WIPEOUT #{self.wipeout_count}! Balance ₹{old_balance:.0f} < ₹{MARGIN_PER_LOT} -> INJECTED ₹{injection_amount:.0f} -> Reset to ₹{self.initial_balance}")
             
         return self.current_balance
     
@@ -52,8 +60,9 @@ class BalanceMonitor:
         """Return summary stats"""
         return {
             'initial_balance': self.initial_balance,
+            'total_deposited': self.total_deposited, # Track total money put in
             'current_balance': self.current_balance,
-            'net_pnl_rupees': self.current_balance - self.initial_balance,
+            'net_pnl_rupees': self.current_balance - self.total_deposited, # True PnL
             'wipeout_count': self.wipeout_count,
             'trade_count': self.trade_count,
             'balance_history': self.balance_history
@@ -136,6 +145,22 @@ class BacktestMode(BaseMode):
                     pnl=('pnl', 'sum')
                 ).reset_index()
                 
+                # --- METRICS CALCULATION ---
+                # Sharpe Ratio (Daily PnL)
+                import numpy as np
+                daily_pnl = daily_stats['pnl'].values
+                mean_daily_pnl = np.mean(daily_pnl)
+                std_daily_pnl = np.std(daily_pnl)
+                
+                # Annualized Sharpe (assuming 252 trading days)
+                # Risk Free Rate roughly 0 for this short timeframe or included in expectation
+                sharpe_ratio = (mean_daily_pnl / std_daily_pnl * np.sqrt(252)) if std_daily_pnl != 0 else 0
+                
+                # Sortino (Downside Deviation)
+                downside_returns = daily_pnl[daily_pnl < 0]
+                std_downside = np.std(downside_returns) if len(downside_returns) > 0 else 1e-9
+                sortino_ratio = (mean_daily_pnl / std_downside * np.sqrt(252)) if len(downside_returns) > 0 else 0
+                
                 # Calculate metrics using business days to ignore weekends
                 b_days = pd.bdate_range(start=self.start_date.date(), end=self.end_date.date())
                 total_trading_days = len(b_days)
@@ -152,6 +177,7 @@ class BacktestMode(BaseMode):
                 losing_trades = trades_df[trades_df['pnl'] < 0]['pnl']
                 avg_win = winning_trades.mean() if len(winning_trades) > 0 else 0
                 avg_loss = losing_trades.mean() if len(losing_trades) > 0 else 0
+                profit_factor = abs(winning_trades.sum() / losing_trades.sum()) if losing_trades.sum() != 0 else 99.9
                 
                 # Fidelity metrics
                 avg_max_pnl = trades_df['max_pnl'].mean() if total_trades > 0 else 0
@@ -159,26 +185,64 @@ class BacktestMode(BaseMode):
                 
                 logger.info("\n📊 AGGREGATED STATISTICS:")
                 logger.info("-"*60)
-                logger.info(f"   Highest Trades Day:    {max_trade_day['date']} ({int(max_trade_day['trades'])} trades → {max_trade_pnl_str} pts)")
+                logger.info(f"   Sharpe Ratio:          {sharpe_ratio:.2f}")
+                logger.info(f"   Sortino Ratio:         {sortino_ratio:.2f}")
+                logger.info(f"   Profit Factor:         {profit_factor:.2f}")
                 logger.info(f"   Avg Trades/Day:        {avg_trades_per_day:.1f}")
-                logger.info(f"   Days with No Trades:   {days_with_no_trades}")
                 logger.info(f"   Avg Profit/Win:        +{avg_win:.1f} pts")
                 logger.info(f"   Avg Loss/Lose:         {avg_loss:.1f} pts")
                 logger.info(f"   Avg Peak Profit (MFE): +{avg_max_pnl:.1f} pts")
-                logger.info(f"   Overall Mean Open PnL: +{avg_mean_open_pnl:.1f} pts")
+
+                # Advanced Metrics: Best, Worst, Streak
+                try:
+                    best_trade_pnl = 0
+                    worst_trade_pnl = 0
+                    longest_win_streak = 0
+                    current_streak = 0
+                    
+                    if total_trades > 0:
+                        best_trade_pnl = trades_df['pnl'].max()
+                        worst_trade_pnl = trades_df['pnl'].min()
+                        
+                        # Calculate Streaks
+                        for pnl in trades_df['pnl']:
+                            if pnl > 0:
+                                current_streak += 1
+                            else:
+                                longest_win_streak = max(longest_win_streak, current_streak)
+                                current_streak = 0
+                        longest_win_streak = max(longest_win_streak, current_streak)
+
+                    logger.info(f"   Best Trade:            {best_trade_pnl:+.1f} pts")
+                    logger.info(f"   Worst Trade:           {worst_trade_pnl:+.1f} pts")
+                    logger.info(f"   Longest Win Streak:    {longest_win_streak} trades")
+                except Exception as m_err:
+                    logger.error(f"   ⚠️ Failed to calc advanced metrics: {m_err}")
+                    best_trade_pnl = 0
+                    worst_trade_pnl = 0
+                    longest_win_streak = 0
                 logger.info("-"*60)
+            else:
+                sharpe_ratio = 0
+                sortino_ratio = 0
+                profit_factor = 0
+                best_trade_pnl = 0
+                worst_trade_pnl = 0
+                longest_win_streak = 0
             
             # Overall Max Drawdown (Equity Curve)
             max_dd = 0
-            peak = 0
-            cumulative_pnl = 0
-            for pnl in trades_df['pnl']:
-                cumulative_pnl += pnl
-                if cumulative_pnl > peak:
-                    peak = cumulative_pnl
-                dd = cumulative_pnl - peak
-                if dd < max_dd:
-                    max_dd = dd
+            try:
+                peak = 0
+                cumulative_pnl = 0
+                for pnl in trades_df['pnl']:
+                    cumulative_pnl += pnl
+                    if cumulative_pnl > peak:
+                        peak = cumulative_pnl
+                    dd = cumulative_pnl - peak
+                    if dd < max_dd:
+                        max_dd = dd
+            except: pass
 
             # 2. Extract Nuggets from Logs for THIS session
             logs = conn.execute(f"SELECT content FROM simulation_logs WHERE event_type = 'EOD_AUDIT' AND session_id = '{self.session_id}'").fetchdf()
@@ -210,15 +274,18 @@ class BacktestMode(BaseMode):
             logger.info(f"   - Win Rate:      {win_rate:.1f}% ({total_trades} trades)")
             
             # Balance Monitor Summary
+            bal_summary = {}
             if self.balance_monitor:
                 bal = self.balance_monitor.get_summary()
                 rupee_pnl = bal['net_pnl_rupees']
                 pnl_color = "+" if rupee_pnl >= 0 else ""
+                bal_summary = bal
                 logger.info(f"\n💰 CAPITAL TRACKING:")
-                logger.info(f"   - Initial Balance:   ₹{bal['initial_balance']:,}")
+                logger.info(f"   - Initial:           ₹{bal['initial_balance']:,}")
+                logger.info(f"   - Total Deposited:   ₹{bal['total_deposited']:,.0f}")
                 logger.info(f"   - Final Balance:     ₹{bal['current_balance']:,.0f}")
                 logger.info(f"   - Net P&L (₹):       {pnl_color}₹{rupee_pnl:,.0f}")
-                logger.info(f"   - Wipeouts:          {bal['wipeout_count']} (resets when < ₹10,000)")
+                logger.info(f"   - Wipeouts:          {bal['wipeout_count']}")
 
             
             logger.info("\n💎 COLLECTED KNOWLEDGE (Fine-Tuning Nuggets):")
@@ -230,25 +297,69 @@ class BacktestMode(BaseMode):
                     logger.info(f"   [{idx}] {n}")
             
             logger.info("="*80 + "\n")
+            
+            # --- CONSTRUCT MARKDOWN REPORT ---
+            status_emoji = "🟢" if total_pnl > 0 else "🔴"
+            # Clean Report for Telegram (Busing fallback tags)
+            report_text = f"🏁 *Backtest Complete: {self.symbol}*\n\n"
+            report_text += f"{status_emoji} *Total PnL:* {total_pnl:+.1f} pts\n"
+            report_text += f"📊 *Win Rate:* {win_rate:.1f}% ({total_trades} trades)\n"
+            report_text += f"📉 *Max Drawdown:* {abs(max_dd):.1f} pts\n\n"
+            report_text += f"*Performance Metrics:*\n"
+            report_text += f"• Sharpe Ratio: {sharpe_ratio:.2f}\n"
+            report_text += f"• Profit Factor: {profit_factor:.2f}\n"
+            report_text += f"• Avg Trade: {avg_trades_per_day:.1f}/day\n"
+            report_text += f"• Best Trade: {best_trade_pnl:+.1f} pts\n"
+            report_text += f"• Worst Trade: {worst_trade_pnl:+.1f} pts\n"
+            report_text += f"• Longest Streak: {longest_win_streak} wins\n"
+            
+            if bal_summary:
+                pnl_color = "🟢" if bal_summary['net_pnl_rupees'] >= 0 else "🔴"
+                report_text += f"\n*💰 Capital Account:*\n"
+                report_text += f"• Final Balance: ₹{bal_summary['current_balance']:,.0f}\n"
+                report_text += f"• Net PnL: {pnl_color} ₹{bal_summary['net_pnl_rupees']:,.0f}\n"
+                if bal_summary['wipeout_count'] > 0:
+                     report_text += f"• 💀 Wipeouts: {bal_summary['wipeout_count']}\n"
+
             # TELEGRAM NOTIFICATION (Final Summary)
             summary_payload = {
                 "total_pnl": total_pnl,
                 "max_dd": abs(max_dd),
                 "win_rate": win_rate,
                 "total_trades": total_trades,
-                "nuggets": nuggets if nuggets else []
+                "sharpe": f"{sharpe_ratio:.2f}",
+                "profit_factor": f"{profit_factor:.2f}",
+                "nuggets": nuggets if nuggets else [],
+                "report_text": report_text,
+                "message": report_text # Backwards compatibility/n8n direct text
             }
             
             if self.balance_monitor:
                 bal = self.balance_monitor.get_summary()
                 summary_payload['balance'] = {
                     "initial": bal['initial_balance'],
+                    "total_deposited": bal['total_deposited'],
                     "final": bal['current_balance'],
                     "net_pnl": bal['net_pnl_rupees'],
                     "wipeouts": bal['wipeout_count']
                 }
             
             self._emit_telegram_event("SUMMARY", summary_payload, mode_tag="BACKTEST")
+            
+            # --- BYPASS: Send via LLM_TRACE (Guaranteed Visibility) ---
+            trace_payload = {
+                "llm_type": "🏁 FINAL REPORT",
+                "time": "END",
+                "mode": "BACKTEST",
+                "action": "COMPLETE",
+                "confidence": 100.0,
+                "sl_points": None,
+                "target_points": None,
+                "reason": report_text, # Inject Markdown Report here
+                "engine_decision": "COMPLETED",
+                "engine_reason": "Backtest Finished"
+            }
+            self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag="BACKTEST")
             
             # --- COUNTERFACTUAL ANALYSIS (Auto-run) ---
             logger.info("\n🔬 COUNTERFACTUAL ANALYSIS")
@@ -397,7 +508,46 @@ class BacktestMode(BaseMode):
                     except Exception as e:
                         logger.error(f"   ❌ Tactical Update Error at {current_time}: {e}")
                     
-                # D. Heartbeat Log removed for compact output - trade executions provide sufficient visibility
+                # D. Heartbeat Log (Restored for Visibility)
+                if last_heartbeat_time is None: last_heartbeat_time = current_time
+                time_since_hb = (current_time - last_heartbeat_time).total_seconds() / 60
+                # Log heartbeat every 60 mins OR if it's 15:00 (Near close)
+                if time_since_hb >= 60 or (current_time.minute == 0 and current_time.hour == 15):
+                    # Check current PnL if any
+                    open_pnl_str = ""
+                    if self.hot_path.open_position:
+                         # Calculate mock pnl
+                         pos = self.hot_path.open_position
+                         live_pnl = (tick['close'] - pos['entry_price']) if pos['side'] == 'CALL' else (pos['entry_price'] - tick['close'])
+                         open_pnl_str = f" | Open PnL: {live_pnl:.1f}"
+                    
+                    instr = self.hot_path.active_instructions.get('action', 'WAIT')
+                    logger.info(f"   [{current_time.strftime('%H:%M')}] 💓 Heartbeat: {tick['close']:.1f} | Action: {instr}{open_pnl_str}")
+                    
+                    # Force TELEGRAM Status update (Visible to User)
+                    # Force TELEGRAM Status update (Visible to User)
+                    atr_val = getattr(self, 'last_atr', 'N/A')
+                    vix_val = getattr(self, 'last_vix', 'N/A')
+                    hb_msg = f"💓 *Heartbeat* [{current_time.strftime('%H:%M')}]\nPrice: {tick['close']:.1f}\nAction: {instr}"
+                    if atr_val != 'N/A': hb_msg += f"\nVol: ATR {atr_val:.1f} | VIX {vix_val}"
+                    if open_pnl_str: hb_msg += f"\n{open_pnl_str.strip()}"
+
+                    self._emit_telegram_event("STATUS", {
+                        "date": current_time.strftime('%Y-%m-%d'),
+                        "time": current_time.strftime('%H:%M'),
+                        "price": tick['close'],
+                        "action": instr,
+                        "open_pnl": open_pnl_str.replace(" | Open PnL: ", "") if open_pnl_str else "0.0",
+                        "balance": self.balance_monitor.current_balance,
+                        "message": hb_msg,
+                        "economics": {
+                            "atr": atr_val,
+                            "vix": vix_val
+                        }
+                    }, mode_tag="BACKTEST")
+                    
+                    last_heartbeat_time = current_time
+
             
             # 4. EOD Journal
             self.trigger_eod_journal(current_date)
@@ -494,11 +644,20 @@ class BacktestMode(BaseMode):
         self.morning_brief = brief 
         self.journal.log_event(ts, "MORNING", brief)
         
+        gap_str = "N/A"
+        if gap_info:
+            gap_str = f"{gap_info.get('direction')} {gap_info.get('pts'):.1f}pts ({gap_info.get('pct'):.1f}%) [{gap_info.get('type')}]"
+
         self._emit_telegram_event("MORNING_BRIEF", {
             "date": ts.strftime('%Y-%m-%d'),
             "personality": brief.get('market_personality'),
             "bias": brief.get('primary_bias'),
-            "plan": logic
+            "plan": logic,
+            "economics": {
+                "vix_regime": brief.get('vix_regime', 'NORMAL'),
+                "gap": gap_str,
+                "prev_close": mb_context.get('daily_3', [{}])[0].get('c', 'N/A')
+            }
         }, mode_tag="BACKTEST")
 
     def trigger_tactical_update(self, tick):
@@ -578,10 +737,29 @@ class BacktestMode(BaseMode):
                 # DEBUG: Confirm we reached this point
                 print(f"      🔍 TRACE_DEBUG: Emitting TACTICAL LLM_TRACE at {tick['timestamp'].strftime('%H:%M')}")
                 
+                # Save state for Heartbeat
+                self.last_atr = instructions.get('atr')
+                self.last_vix = instructions.get('vix')
+
                 # --- EMIT LLM_TRACE (UPGRADE) ---
-                # Only send if action is NOT HOLD to avoid Telegram rate limits (429)
+                # Only send if action is NOT HOLD, OR if it has been a long time since last trace (e.g. 60 mins)
+                # We need to track last_trace_time on 'self' to do this properly.
+                # Assuming 'last_tactical_update' roughly tracks it, but let's be permissive for HOLD.
                 action_for_trace = instructions.get('action', 'HOLD')
-                should_emit_trace = action_for_trace in ['BUY_CALL', 'BUY_PUT'] or instructions.get('gate_rejected')
+                
+                # Check for significant state changes
+                is_trade_action = action_for_trace in ['BUY_CALL', 'BUY_PUT']
+                is_rejected = instructions.get('gate_rejected')
+                
+                # Throttled TRACE for HOLD (Pass if minute is 00 or 30, i.e., twice an hour)
+                # Since tactical runs every 15 mins (00, 15, 30, 45), fetching at 00 and 30 gives 2 traces/hr.
+                is_periodic_hold = False
+                if action_for_trace == 'HOLD':
+                    minute = tick['timestamp'].minute
+                    if minute == 0 or minute == 30: 
+                        is_periodic_hold = True
+
+                should_emit_trace = is_trade_action or is_rejected or is_periodic_hold
                 
                 if should_emit_trace:
                     try:
@@ -598,8 +776,12 @@ class BacktestMode(BaseMode):
                                     'c': round(c.get('c', 0), 1)
                                 })
                         
+                        trace_title = "TACTICAL"
+                        if action_for_trace == "HOLD":
+                            trace_title = "TACTICAL (MONITORING)"
+                        
                         trace_payload = {
-                            "llm_type": "TACTICAL",
+                            "llm_type": trace_title,
                             "time": tick['timestamp'].strftime('%H:%M'),
                             "tick_time": str(instructions.get('tick_time', 'N/A')),
                             "mode": instructions.get('mode', 'UNKNOWN'),
@@ -611,7 +793,13 @@ class BacktestMode(BaseMode):
                             "reason": instructions.get('technical_reason', instructions.get('reason', 'N/A')),
                             "engine_decision": instructions.get('engine_decision', 'EXECUTED'),
                             "engine_reason": instructions.get('engine_reason'),
-                            "last_3_candles": last_3_candles
+                            "last_3_candles": last_3_candles,
+                            "market_data": {
+                                "atr": instructions.get('atr', 'N/A'),
+                                "vix": instructions.get('vix', 'N/A'),
+                                "support": instructions.get('support', 'N/A'),
+                                "resistance": instructions.get('resistance', 'N/A')
+                            }
                         }
                         self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag="BACKTEST")
                     except Exception as trace_err:
