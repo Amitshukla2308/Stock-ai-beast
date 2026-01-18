@@ -190,7 +190,7 @@ def calculate_trend_efficiency(bars_5min, window=5):
     Returns: (ter_value, regime)
     """
     if not bars_5min or len(bars_5min) < window:
-        return 0.0, "ROTATION"
+        return 0.0, "ROTATION", 0.0  # ter, regime, regime_momentum
         
     recent_bars = bars_5min[-window:]
     
