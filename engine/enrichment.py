@@ -204,11 +204,26 @@ def calculate_trend_efficiency(bars_5min, window=5):
     ter = abs(net_displacement) / max(sum_ranges, 1e-6)
     ter = round(ter, 2)
     
+    # --- REGIME MOMENTUM (Phase 2.7-Light) ---
+    # RM = Rate of change in trend quality
+    # Detects improving vs deteriorating trends
+    regime_momentum = 0.0
+    
+    if len(recent_bars) >= 6:  # Need at least 6 bars (current 3 + previous 3)
+        # Calculate TER for 3 bars ago
+        bars_3ago = recent_bars[-6:-3]  # 3 bars before the current 3
+        net_3ago = bars_3ago[-1]['c'] - bars_3ago[0]['o']
+        sum_ranges_3ago = sum((b['h'] - b['l']) for b in bars_3ago)
+        ter_3ago = abs(net_3ago) / max(sum_ranges_3ago, 1e-6)
+        
+        # RM = Current TER - Previous TER
+        regime_momentum = round(ter - ter_3ago, 3)
+    
     regime = "TRANSITION"
     if ter > 0.55: regime = "TREND"
     elif ter < 0.30: regime = "ROTATION"
     
-    return ter, regime
+    return ter, regime, regime_momentum
 
 def calculate_effective_atr(bars_5min, current_atr, direction="NEUTRAL", window=20):
     """
@@ -689,7 +704,7 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
     total_cond = 4
 
     # 7. Phase-2 Geometry Extensions
-    ter, trend_regime = calculate_trend_efficiency(today_5min)
+    ter, trend_regime, regime_momentum = calculate_trend_efficiency(today_5min)
 
     # 7b. TREND_GRIND Detection
     # Logic: TrendEfficiency > 0.35 AND NetProgress > 0.6*ATR AND No Impulse/Expansion
@@ -764,6 +779,7 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
         "v_reversal": detect_v_reversal(bars_15min, current_price, em_low, em_high, atr_14),
         "trend_efficiency": ter,
         "trend_regime": trend_regime,
+        "regime_momentum": regime_momentum,  # Phase 2.7-Light
         "effective_atr": effective_atr,
         "bearish_exhaustion": bearish_exhaustion,
         "is_grind": is_grind,

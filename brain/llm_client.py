@@ -1094,20 +1094,36 @@ class LLMClient:
                     data['engine_decision'] = "BLOCKED"
             
             
-            # 2. ITC Gate (Continuation Validity) - ASYMMETRIC THRESHOLDS
-            # Bearish days naturally have lower TER due to volatility spikes
+            # 2. ITC Gate (Continuation Validity) - REGIME MOMENTUM (Phase 2.7-Light)
+            # For CALL: Use absolute TER (smooth bullish moves)
+            # For PUT: Use Regime Momentum (choppy bearish breakdowns)
             if sel_style == "INTRADAY_TREND_CONTINUATION" or sel_style == "ITC":
                 net_prog = abs(micro_context.get('net_progress_3', 0))
                 action = data.get('action', 'HOLD')
+                regime_momentum = micro_context.get('regime_momentum', 0.0)
                 
-                # Asymmetric TER: Bullish 0.55 / Bearish 0.35
-                ter_threshold = 0.55 if action == 'BUY_CALL' else 0.35
+                if action == 'BUY_CALL':
+                    # Bullish: Use absolute TER threshold
+                    if ter < 0.55 and net_prog < 0.5 * eff_atr:
+                        logger.warning(f"      [ENGINE] 🛑 ITC BLOCKED (CALL): TER ({ter:.2f}) < 0.55 or NetProgress ({net_prog}) < 0.5*ATR.")
+                        data['action'] = "HOLD"
+                        data['reason'] = f"ITC Blocked: Trend Quality Inefficient (TER {ter:.2f})"
+                        data['engine_decision'] = "BLOCKED"
                 
-                if ter < ter_threshold and net_prog < 0.5 * eff_atr:
-                    logger.warning(f"      [ENGINE] 🛑 ITC BLOCKED: TER ({ter:.2f}) < {ter_threshold} or NetProgress ({net_prog}) < 0.5*ATR ({eff_atr}).")
-                    data['action'] = "HOLD"
-                    data['reason'] = f"ITC Blocked: Trend Quality Inefficient (TER {ter:.2f} < {ter_threshold})"
-                    data['engine_decision'] = "BLOCKED"
+                elif action == 'BUY_PUT':
+                    # Bearish: Use Regime Momentum (rate of change)
+                    # Allow if trend is building (RM >= 0) OR has minimal quality
+                    rm_ok = regime_momentum >= 0
+                    quality_ok = (ter > 0.10 and net_prog > 0.5 * eff_atr)
+                    
+                    if not (rm_ok or quality_ok):
+                        logger.warning(f"      [ENGINE] 🛑 ITC BLOCKED (PUT): RM={regime_momentum:.3f} < 0 AND (TER {ter:.2f} < 0.10 OR NetProg {net_prog} < 0.5*ATR).")
+                        data['action'] = "HOLD"
+                        data['reason'] = f"ITC Blocked: Trend Deteriorating (RM={regime_momentum:.3f}, TER={ter:.2f})"
+                        data['engine_decision'] = "BLOCKED"
+                    else:
+                        logger.info(f"      [RM] ✅ PUT Allowed: RM={regime_momentum:.3f}, TER={ter:.2f}, NetProg={net_prog:.1f}")
+                    
                     
                     
             # 3. REGIME-SPECIFIC STYLE PERMISSIONS (TREND_GRIND)
