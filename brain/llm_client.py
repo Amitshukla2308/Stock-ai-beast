@@ -1093,14 +1093,22 @@ class LLMClient:
                     data['reason'] = f"ORE Blocked: Trend Efficiency too low ({ter:.2f})"
                     data['engine_decision'] = "BLOCKED"
             
-            # 2. ITC Gate (Continuation Validity)
+            
+            # 2. ITC Gate (Continuation Validity) - ASYMMETRIC THRESHOLDS
+            # Bearish days naturally have lower TER due to volatility spikes
             if sel_style == "INTRADAY_TREND_CONTINUATION" or sel_style == "ITC":
                 net_prog = abs(micro_context.get('net_progress_3', 0))
-                if ter < 0.55 and net_prog < 0.5 * eff_atr:
-                    logger.warning(f"      [ENGINE] 🛑 ITC BLOCKED: TER ({ter:.2f}) < 0.55 or NetProgress ({net_prog}) < 0.5*ATR ({eff_atr}).")
+                action = data.get('action', 'HOLD')
+                
+                # Asymmetric TER: Bullish 0.55 / Bearish 0.35
+                ter_threshold = 0.55 if action == 'BUY_CALL' else 0.35
+                
+                if ter < ter_threshold and net_prog < 0.5 * eff_atr:
+                    logger.warning(f"      [ENGINE] 🛑 ITC BLOCKED: TER ({ter:.2f}) < {ter_threshold} or NetProgress ({net_prog}) < 0.5*ATR ({eff_atr}).")
                     data['action'] = "HOLD"
-                    data['reason'] = f"ITC Blocked: Trend Quality Inefficient (TER {ter:.2f})"
+                    data['reason'] = f"ITC Blocked: Trend Quality Inefficient (TER {ter:.2f} < {ter_threshold})"
                     data['engine_decision'] = "BLOCKED"
+                    
                     
             # 3. REGIME-SPECIFIC STYLE PERMISSIONS (TREND_GRIND)
             active_regime = data.get('active_regime', 'RANGE')
@@ -1416,8 +1424,12 @@ class LLMClient:
                 logger.debug(f"      [ELASTIC] ⚠️ Regime TRANSITION: Capping Target to 1.0*ATR")
                 
             elif active_regime == 'ROTATION':
-                # Allow ITC only if TER > 0.2 (High Quality for Rotation) AND Strong Direction
-                if ter > 0.20 and dir_strength > 0.3 * eff_atr:
+                # Allow ITC only if TER > threshold (asymmetric) AND Strong Direction
+                # Bearish rotation naturally has lower TER
+                action = data.get('action', 'HOLD')
+                ter_rot_threshold = 0.20 if action == 'BUY_CALL' else 0.12
+                
+                if ter > ter_rot_threshold and dir_strength > 0.3 * eff_atr:
                     regime_quality = 'MEDIUM'
                     modulate_geometry = True
                     mod_sl_mult = 0.5 # Tight SL
@@ -1425,11 +1437,9 @@ class LLMClient:
                     logger.debug(f"      [ELASTIC] ⚠️ Regime ROTATION: Allowing ITC with Tight SL (TER {ter:.2f} OK)")
                 else:
                     regime_quality = 'LOW'
-                    # We don't block yet, we just set quality low, effectively reducing conf expectation later?
-                    # Or valid to block explicit ITC in low quality rotation.
                     sel_style = data.get('selected_style', '')
                     if sel_style in ['ITC', 'INTRADAY_TREND_CONTINUATION']:
-                        logger.warning(f"      [ELASTIC] 🛑 ROTATION BLOCK: TER {ter:.2f} too low for meaningful trend.")
+                        logger.warning(f"      [ELASTIC] 🛑 ROTATION BLOCK: TER {ter:.2f} < {ter_rot_threshold} (threshold for {action}).")
                         data['action'] = "HOLD"
                         data['engine_decision'] = "BLOCKED"
                         
