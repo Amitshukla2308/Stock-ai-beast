@@ -69,11 +69,12 @@ class BalanceMonitor:
         }
 
 class BacktestMode(BaseMode):
-    def __init__(self, start_date, end_date, symbol="NIFTY", initial_balance=30000, chat_id=None):
+    def __init__(self, start_date, end_date, symbol="NIFTY", resolution="1", initial_balance=30000, chat_id=None):
         self.chat_id = chat_id
         self.start_date = start_date
         self.end_date = end_date
         self.symbol = symbol
+        self.resolution = resolution
         self.conn_rw = False # Connection will be opened on-demand
         self.session_id = f"BACKTEST_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
@@ -308,6 +309,7 @@ class BacktestMode(BaseMode):
             report_text += f"*Performance Metrics:*\n"
             report_text += f"• Sharpe Ratio: {sharpe_ratio:.2f}\n"
             report_text += f"• Profit Factor: {profit_factor:.2f}\n"
+            if 'avg_trades_per_day' not in locals(): avg_trades_per_day = 0 # Safety init
             report_text += f"• Avg Trade: {avg_trades_per_day:.1f}/day\n"
             report_text += f"• Best Trade: {best_trade_pnl:+.1f} pts\n"
             report_text += f"• Worst Trade: {worst_trade_pnl:+.1f} pts\n"
@@ -362,18 +364,24 @@ class BacktestMode(BaseMode):
             self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag="BACKTEST")
             
             # --- COUNTERFACTUAL ANALYSIS (Auto-run) ---
+            from counterfactual_truth import CounterfactualAnalyzer
+            
             logger.info("\n🔬 COUNTERFACTUAL ANALYSIS")
             logger.info("=" * 80)
             try:
-                cf_results = self._run_counterfactual_analysis()
-                if cf_results:
-                    # Send to Telegram
-                    self._emit_telegram_event("COUNTERFACTUAL", cf_results, mode_tag="BACKTEST")
+                analyzer = CounterfactualAnalyzer(session_id=self.session_id)
+                report = analyzer.run_full_analysis()
+                if report:
+                    logger.info(report)
+                    # Send to Telegram - Wrap in dict for compatibility if needed, or send as text
+                    self._emit_telegram_event("COUNTERFACTUAL", {"report": report}, mode_tag="BACKTEST")
                     logger.info("✅ Counterfactual analysis complete and sent to Telegram")
                 else:
-                    logger.info("⚠️  No counterfactual data available")
+                    logger.info("⚠️  No counterfactual data available (or data load failed)")
             except Exception as cf_err:
                 logger.error(f"❌ Counterfactual analysis failed: {cf_err}")
+                import traceback
+                traceback.print_exc()
             logger.info("=" * 80 + "\n")
             
             conn.close()
@@ -381,13 +389,16 @@ class BacktestMode(BaseMode):
             logger.error(f"   ❌ Final Reporting Error: {e}")
 
     def fetch_data_for_day(self, date):
-        """Fetch 5-min candles for the specific day (Database is in UTC)"""
+        """Fetch candles for the specific day (Database is in UTC)"""
         date_str = date.strftime('%Y-%m-%d')
         # 09:15 IST = 03:45 UTC
         # 15:30 IST = 10:00 UTC
         full_symbol = get_fyers_symbol(self.symbol)
+        
+        table_name = "candles_5min" if getattr(self, 'resolution', '1') == '5' else "candles_1min"
+        
         query = f"""
-            SELECT * FROM candles_1min 
+            SELECT * FROM {table_name}
             WHERE symbol = '{full_symbol}'
               AND timestamp >= '{date_str} 03:45:00' 
               AND timestamp <= '{date_str} 10:00:00'
@@ -478,29 +489,22 @@ class BacktestMode(BaseMode):
                         logger.info(f"   ⚡ GAP DETECTED: {gap_direction} {abs(gap_pts):.0f}pts ({abs(gap_pct):.1f}%) - {gap_type}")
                     gap_analyzed = True
                 
-                # A2. EARLY Morning Briefing @ 09:20 for SIGNIFICANT/EXTREME gaps
-                if not morning_brief_done and gap_analyzed and gap_info and gap_info['type'] in ['SIGNIFICANT', 'EXTREME'] and current_time.time() >= time(9, 20):
-                    logger.info(f"   ⚡ EARLY BRIEF triggered due to {gap_info['type']} gap")
+                # A2. Morning Briefing @ 09:20 (always)
+                if not morning_brief_done and current_time.time() >= time(9, 20):
                     self.trigger_morning_brief(current_date, first_tick=tick, gap_info=gap_info)
                     morning_brief_done = True
-                    # For EXTREME gaps, trigger immediate tactical
-                    if gap_info['type'] == 'EXTREME':
-                        logger.info(f"   ⚡ IMMEDIATE TACTICAL for {gap_info['type']} gap")
-                        self.trigger_tactical_update(tick)
-                    last_tactical_update = current_time
-                
-                # A3. Standard Morning Briefing @ 09:30 (if no early brief)
-                elif not morning_brief_done and current_time.time() >= time(9, 30):
-                    self.trigger_morning_brief(current_date, first_tick=tick, gap_info=gap_info)
-                    morning_brief_done = True
-                    # Set tactical update baseline to now so we don't trigger immediately
-                    last_tactical_update = current_time 
+                    # Set tactical baseline to 09:30 so first tactical fires at 09:30
+                    last_tactical_update = current_time.replace(hour=9, minute=15, second=0)
+                    # Skip tactical on this same tick to decouple morning brief from tactical
+                    skip_tactical_this_tick = True
+                else:
+                    skip_tactical_this_tick = False
                 
                 # B. Process Tick (Hot Path)
                 self.on_tick(tick)
                 
-                # C. Check for 15-min Tactical Update (Only after Morning Brief)
-                if morning_brief_done and self.should_trigger_tactical(current_time, last_tactical_update):
+                # C. Check for 15-min Tactical Update (Only after Morning Brief, skip if same tick)
+                if morning_brief_done and not skip_tactical_this_tick and self.should_trigger_tactical(current_time, last_tactical_update):
                     try:
                         self.trigger_tactical_update(tick)
                         last_tactical_update = current_time
@@ -569,6 +573,15 @@ class BacktestMode(BaseMode):
                  if trade.get('type') == 'EXIT':
                      self.journal.log_trade(trade)
                      
+                     # --- CLEAN UI LOG (EXIT) ---
+                     time_str = tick['timestamp'].strftime('%H:%M')
+                     price = tick['close']
+                     pnl = trade.get('pnl', 0)
+                     pnl_str = f"+{pnl:.1f}" if pnl >= 0 else f"{pnl:.1f}"
+                     bal = int(self.balance_monitor.current_balance)
+                     
+                     logger.info(f"[{time_str}] {price} | 💰 EXIT: PnL {pnl_str} (Balance: {bal})")
+
                      # TELEGRAM NOTIFICATION (EXIT)
                      self._emit_telegram_event("TRADE", {
                          "date": tick['timestamp'].strftime('%Y-%m-%d'),
@@ -581,6 +594,16 @@ class BacktestMode(BaseMode):
                      }, mode_tag="BACKTEST")
                  
                  elif trade.get('type') == 'ENTRY':
+                     # --- CLEAN UI LOG (ENTRY) ---
+                     time_str = tick['timestamp'].strftime('%H:%M')
+                     price = tick['close']
+                     side = trade.get('side')
+                     entry = trade.get('entry_price')
+                     sl = trade.get('sl')
+                     tgt = trade.get('target')
+                     
+                     logger.info(f"[{time_str}] {price} | 🚀 ENTRY: {side} @ {entry} (SL:{sl}, TGT:{tgt})")
+
                      # TELEGRAM NOTIFICATION (ENTRY)
                      self._emit_telegram_event("ENTRY", {
                          "date": tick['timestamp'].strftime('%Y-%m-%d'),
@@ -606,23 +629,30 @@ class BacktestMode(BaseMode):
 
     def trigger_morning_brief(self, date, first_tick=None, gap_info=None):
         if gap_info and gap_info['type'] != 'NORMAL':
-            logger.info(f"   [09:20] 🧠 EARLY Morning Briefing ({gap_info['type']} Gap)...")
+            logger.info(f"   [09:20] 🧠 Morning Briefing ({gap_info['type']} Gap)...")
         else:
-            logger.info(f"   [09:30] 🧠 Morning Briefing...")
+            logger.info(f"   [09:20] 🧠 Morning Briefing...")
         
         # Ensure we use the tick timestamp for precise context
-        ts = first_tick['timestamp'] if first_tick else date.astimezone(IST).replace(hour=9, minute=30)
-        context = fetch_context_data(ts, symbol=self.symbol)
+        ts = first_tick['timestamp'] if first_tick else date.astimezone(IST).replace(hour=9, minute=20)
+        context = fetch_context_data(ts, symbol=self.symbol, resolution=self.resolution)
         
         # SLICING: Optimization for Morning Brief
         mb_context = context.copy()
         
         # Add Prev Close for Gap Analysis
         if context.get('daily_3'):
-            prev_close = context['daily_3'][0]['c'] # Index 0 is Yesterday (DESC)
-            # Inject into the tick data for the prompt
-            if first_tick:
-                first_tick['prev_close'] = prev_close
+            daily_3 = context['daily_3']
+            # FILTER: Find first candle strictly BEFORE today
+            current_date_str = date.strftime('%Y-%m-%d')
+            prev_day_candle = next((d for d in daily_3 if d.get('date', '9999') < current_date_str), None)
+            
+            if prev_day_candle:
+                # logger.debug(f"      [DEBUG] Fixed Prev Close Source: {prev_day_candle['date']} (Today: {current_date_str})")
+                prev_close = prev_day_candle['c']
+                # Inject into the tick data for the prompt
+                if first_tick:
+                    first_tick['prev_close'] = prev_close
         
         # Add gap info to context for LLM
         if gap_info:
@@ -639,9 +669,28 @@ class BacktestMode(BaseMode):
                  'morning_logic': 'Fallback: Defensive Mode due to Brain Failure'
              }
 
-        logic = brief.get('morning_logic', brief.get('market_logic', "No Logic Provided"))
-        logger.info(f"      📝 Plan: {logic}")
+        # ADAPT TO NEW POLICY SCHEMA (STATE MACHINE)
+        # Old: morning_logic, market_personality, primary_bias
+        # New: notes, risk_regime.vix_state, tactical_permissions.gap_protocol
+        
+        logic = brief.get('notes', brief.get('morning_logic', brief.get('market_logic', "No Logic Provided")))
+        
+        # Risk Regime as Personality proxy
+        personality = brief.get('risk_regime', {}).get('vix_state', brief.get('market_personality', 'NORMAL'))
+        
+        # Gap Protocol or Bias as Bias proxy
+        bias = brief.get('tactical_permissions', {}).get('gap_protocol', brief.get('primary_bias', 'POLICY_MODE'))
+
+        logger.info(f"      [BRAIN] 📝 Plan: {logic}")
         self.morning_brief = brief 
+        
+        # Log calculated pivot levels (stored in reference_levels by llm_client)
+        levels = brief.get('reference_levels', {})
+        support = levels.get('support', 'N/A')
+        pivot = levels.get('pivot', 'N/A')
+        resistance = levels.get('resistance', 'N/A')
+        logger.info(f"      [BRAIN] 📊 Levels: S={support} | P={pivot} | R={resistance}")
+        
         self.journal.log_event(ts, "MORNING", brief)
         
         gap_str = "N/A"
@@ -650,13 +699,13 @@ class BacktestMode(BaseMode):
 
         self._emit_telegram_event("MORNING_BRIEF", {
             "date": ts.strftime('%Y-%m-%d'),
-            "personality": brief.get('market_personality'),
-            "bias": brief.get('primary_bias'),
+            "personality": personality,
+            "bias": bias,
             "plan": logic,
             "economics": {
-                "vix_regime": brief.get('vix_regime', 'NORMAL'),
+                "vix_regime": brief.get('risk_regime', {}).get('vix_state', 'NORMAL'),
                 "gap": gap_str,
-                "prev_close": mb_context.get('daily_3', [{}])[0].get('c', 'N/A')
+                "prev_close": mb_context.get('daily_3', [{}])[0].get('c', 'N/A') if mb_context.get('daily_3') else 'N/A'
             }
         }, mode_tag="BACKTEST")
 
@@ -665,7 +714,7 @@ class BacktestMode(BaseMode):
         
         try:
             # Fetch Real Context
-            context = fetch_context_data(tick['timestamp'], symbol=self.symbol)
+            context = fetch_context_data(tick['timestamp'], symbol=self.symbol, resolution=self.resolution)
             
             # Calculate Real PnL (Position)
             current_pnl = 0
@@ -714,12 +763,12 @@ class BacktestMode(BaseMode):
                 instructions['atr'] = context.get('atr_14')
                 instructions['vix'] = context.get('vix')
                 instructions['morning_bias'] = self.morning_brief.get('primary_bias') if self.morning_brief else 'NEUTRAL'
-                # Add S/P/R levels for proximity filter
-                if self.morning_brief and 'boundary_levels' in self.morning_brief:
-                    levels = self.morning_brief['boundary_levels']
-                    instructions['support'] = levels.get('support_zone', 0)
-                    instructions['pivot'] = levels.get('pivot_point', 0)
-                    instructions['resistance'] = levels.get('resistance_zone', 0)
+                # Add S/P/R levels for proximity filter (stored in reference_levels)
+                if self.morning_brief and 'reference_levels' in self.morning_brief:
+                    levels = self.morning_brief['reference_levels']
+                    instructions['support'] = levels.get('support', 0)
+                    instructions['pivot'] = levels.get('pivot', 0)
+                    instructions['resistance'] = levels.get('resistance', 0)
                 
                 # FIX: Inject tick_time for Exceptional Gate
                 # Note: tick['timestamp'] is ALREADY in IST (converted at line 277)
@@ -735,8 +784,26 @@ class BacktestMode(BaseMode):
                 self.journal.log_event(tick['timestamp'], "TACTICAL", instructions)
 
                 # DEBUG: Confirm we reached this point
-                print(f"      🔍 TRACE_DEBUG: Emitting TACTICAL LLM_TRACE at {tick['timestamp'].strftime('%H:%M')}")
+                # print(f"      🔍 TRACE_DEBUG: Emitting TACTICAL LLM_TRACE at {tick['timestamp'].strftime('%H:%M')}")
                 
+                # --- CLEAN UI LOG ---
+                time_str = tick['timestamp'].strftime('%H:%M')
+                price = tick['close']
+                act = instructions.get('action', 'HOLD')
+                style = instructions.get('selected_style', 'NONE')
+                reason = instructions.get('technical_reason', instructions.get('reason', 'N/A'))[:50] # Truncate reason
+                
+                # Icons for readability
+                brain_icon = "🧠"
+                if act == "BUY_CALL": brain_icon = "🟢 CALL"
+                elif act == "BUY_PUT": brain_icon = "🔴 PUT"
+                elif act == "EXIT": brain_icon = "👋 EXIT"
+                
+                # Only show style if it's not NONE
+                style_str = f"| {style}" if style != "NONE" else ""
+                
+                logger.info(f"[{time_str}] {price} | {brain_icon} {act} {style_str} | \"{reason}...\"")
+
                 # Save state for Heartbeat
                 self.last_atr = instructions.get('atr')
                 self.last_vix = instructions.get('vix')

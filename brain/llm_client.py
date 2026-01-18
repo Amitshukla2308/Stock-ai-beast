@@ -25,12 +25,17 @@ class LLMClient:
         self.brain_model = os.getenv("BRAIN_MODEL_NAME", "Qwen/Qwen2.5-14B-Instruct-Q8")
         
         # Initialize Client
-        logger.info(f"🧠 Brain Connecting to: {self.brain_model} at {self.brain_api_base}")
+        logger.debug(f"🧠 Brain Connecting to: {self.brain_model} at {self.brain_api_base}")
         self.brain_client = OpenAI(base_url=self.brain_api_base, api_key=self.brain_api_key, timeout=300.0)
+        
+        # Persistent State (latched until reversed)
+        self.structural_break_state = None  # None, 'BULLISH', or 'BEARISH'
+        self.structural_break_entry_done = False  # Track if we already entered on this break
+        self.intraday_open = None  # Persistent baseline for the day
 
     def wait_for_model_ready(self):
         """Blocks until the model responds effectively (handles lazy loading)"""
-        logger.info(f"⏳ Verification: Waiting for {self.brain_model} to load...")
+        logger.debug(f"⏳ Verification: Waiting for {self.brain_model} to load...")
         max_retries = 20 # 20 * 5s = 100s (plus client timeout)
         
         for i in range(max_retries):
@@ -62,7 +67,7 @@ class LLMClient:
 
         try:
             # Log System Prompt for visibility
-            logger.info(f"\n--- {role_icon} {role_name} SYSTEM ---\n{system_msg}\n---")
+            logger.debug(f"\n--- {role_icon} {role_name} SYSTEM ---\n{system_msg}\n---")
             
             response = client.chat.completions.create(
                 model=model,
@@ -120,9 +125,10 @@ class LLMClient:
             # Monitoring Log
             lat = (time.time() - start)
             # Log full content (up to 5000 chars) for debugging visibility
-            logger.info(f"\n--- {role_icon} {role_name} OUTPUT ({lat:.2f}s) ---\n{content[:5000]}\n-----------------------")
+            logger.debug(f"\n--- {role_icon} {role_name} OUTPUT ({lat:.2f}s) ---\n{content[:5000]}\n-----------------------")
             
             # Try to parse JSON with error recovery
+            logger.info(f"      [BRAIN] RAW RESPONSE: {content}")
             try:
                 data = json.loads(content)
             except json.JSONDecodeError as e:
@@ -162,8 +168,24 @@ class LLMClient:
                     data = json.loads(truncated)
                     logger.info(f"      ✅ JSON recovery successful (heuristic truncation)")
                 except:
-                    logger.error(f"      ❌ JSON recovery failed, returning None")
-                    return None
+                    # LAST RESORT: Regex extraction for critical keys
+                    logger.warning(f"      ⚠️ JSON recovery failed, attempting regex extraction...")
+                    data = {}
+                    
+                    # Extract notes/plan
+                    logic_match = re.search(r'"(?:notes|morning_logic|market_logic)":\s*"([^"]*)"', content)
+                    if logic_match: data['notes'] = logic_match.group(1)
+                    
+                    # Extract levels
+                    for level in ['support', 'pivot', 'resistance']:
+                        lvl_match = re.search(rf'"{level}":\s*([0-9.]+)', content)
+                        if lvl_match:
+                            if 'reference_levels' not in data: data['reference_levels'] = {}
+                            data['reference_levels'][level] = float(lvl_match.group(1))
+                    
+                    if not data:
+                        logger.error(f"      ❌ JSON recovery failed completely")
+                        return None
             
             return data
         except Exception as e:
@@ -177,11 +199,12 @@ class LLMClient:
         """
         vix_value = context_data.get('vix_spot', 'N/A')
         today_open = current_tick.get('open') if current_tick else None
+        self.intraday_open = today_open  # Latch the day's open
         
         # Calculate industry-standard pivot points
         daily_data = context_data.get('daily_3', []) # Now actually contains 6 days due to database.py change
         pivot, support, resistance = 0, 0, 0
-        d_candles = {}
+        d_candles = {'d1_open':0,'d1_high':0,'d1_low':0,'d1_close':0,'d2_open':0,'d2_high':0,'d2_low':0,'d2_close':0,'d3_open':0,'d3_high':0,'d3_low':0,'d3_close':0}
         prior_close = 0
         prior_range = 0
         
@@ -198,6 +221,7 @@ class LLMClient:
                 pivot = round((h + l + c) / 3, 1)
                 support = round(2 * pivot - h, 1)
                 resistance = round(2 * pivot - l, 1)
+                logger.debug(f"      📐 PIVOT CALC: PriorDay H={h:.1f} L={l:.1f} C={c:.1f} → S={support:.1f} P={pivot:.1f} R={resistance:.1f}")
             
             # Populate d1, d2, d3 (chronological for prompt: d3 is yesterday)
             # daily_data[0] = yesterday (D-1)
@@ -257,7 +281,7 @@ class LLMClient:
             expected_range_pts=auth_context.get('expected_range_pts', 150)
         )
         
-        logger.info(f"\n--- 🧠 BRAIN INPUT (MORNING) ---\n{prompt}\n--------------------------------")
+        logger.debug(f"\n--- 🧠 BRAIN INPUT (MORNING) ---\n{prompt}\n--------------------------------")
         
         # ROUTING: BRAIN with purpose-specific system prompt
         data = self._query_model(SYSTEM_PROMPT_MORNING, prompt)
@@ -275,29 +299,37 @@ class LLMClient:
         )
 
         if data:
-            # Inject pre-calculated levels into response (script-calculated, not LLM)
-            if 'boundary_levels' not in data:
-                data['boundary_levels'] = {}
-            data['boundary_levels']['pivot_point'] = pivot
-            data['boundary_levels']['support_zone'] = support
-            data['boundary_levels']['resistance_zone'] = resistance
-
-            # Authoritative Overrides (Rule Mapping)
-            data['primary_bias'] = authoritative_context.get('primary_bias', data.get('primary_bias'))
-            data['bias_strength'] = authoritative_context.get('bias_strength', data.get('bias_strength'))
-            data['market_personality'] = authoritative_context.get('market_personality', data.get('market_personality'))
-            data['vix_regime'] = authoritative_context.get('vix_regime', data.get('vix_regime'))
-            data['expected_range_pts'] = authoritative_context.get('expected_range_pts', data.get('expected_range_pts', 150))
-            data['invalidation_level'] = authoritative_context.get('invalidation_level', data.get('invalidation_level'))
-            data['max_expected_move'] = authoritative_context.get('max_expected_move', data.get('max_expected_move', 150))
-
-            logger.info(f"      📐 Pivot Levels: S={support:.1f} | P={pivot:.1f} | R={resistance:.1f}")
-            logger.info(f"      ⚖️ Authoritative Bias: {data['primary_bias']} ({data['bias_strength']})")
+            # 1. Inject pre-calculated IMMUTABLE LEVELS
+            if 'reference_levels' not in data:
+                data['reference_levels'] = {}
             
-            personality = data.get('market_personality', 'N/A')
-            vix_regime = data.get('vix_regime', 'N/A')
-            bias = data.get('primary_bias', 'N/A')
-            logger.info(f"      🌅 {personality} | VIX:{vix_regime} | Bias:{bias}")
+            data['reference_levels']['pivot'] = pivot
+            data['reference_levels']['support'] = support
+            data['reference_levels']['resistance'] = resistance
+            
+            # 2. Inject Authoritative Risk/Volatility Overrides
+            if 'risk_regime' not in data:
+                data['risk_regime'] = {}
+                
+            # Use authoritative VIX regime/range if available
+            auth_vix = authoritative_context.get('vix_regime')
+            auth_range = authoritative_context.get('expected_range_pts')
+            
+            if auth_vix: data['risk_regime']['vix_state'] = auth_vix
+            if auth_range: data['risk_regime']['expected_move_pts'] = int(auth_range)
+
+            # 3. Log the Policy Configuration
+            logger.debug(f"      📐 Anchors: S={support} | P={pivot} | R={resistance}")
+            logger.debug(f"      🛡️ Risk Regime: {data['risk_regime']['vix_state']} (Exp: {data['risk_regime']['expected_move_pts']} pts)")
+            logger.debug(f"      📜 Tactical Permissions: {json.dumps(data.get('tactical_permissions', {}))}")
+
+            # Legacy Compatibility (Optional - can be removed if Tactical prompt updated)
+            # data['market_personality'] = data['risk_regime'].get('vix_state', 'NORMAL')
+            # data['primary_bias'] = "NEUTRAL (State Machine)" 
+            
+            return data
+            
+        return None
             
         return data
 
@@ -321,11 +353,11 @@ class LLMClient:
         personality = plan.get('market_personality', 'UNKNOWN') if plan else 'UNKNOWN'
         bias = plan.get('primary_bias', 'NEUTRAL') if plan else 'NEUTRAL'
         
-        # Boundary Levels
-        boundaries = plan.get('boundary_levels', {}) if plan else {}
-        support = boundaries.get('support_zone', 'N/A')
-        resistance = boundaries.get('resistance_zone', 'N/A')
-        pivot = boundaries.get('pivot_point', 'N/A')
+        # Boundary Levels (stored in reference_levels by get_morning_brief)
+        levels = plan.get('reference_levels', {}) if plan else {}
+        support = levels.get('support', 'N/A')
+        resistance = levels.get('resistance', 'N/A')
+        pivot = levels.get('pivot', 'N/A')
         vix_regime_morning = plan.get('vix_regime', 'NORMAL') if plan else 'NORMAL'
         
         last_15min = context.get('last_15min', [])
@@ -374,29 +406,40 @@ class LLMClient:
             calculate_micro_context, calculate_economic_context, 
             calculate_opening_range, calculate_expected_move_envelope,
             calculate_style_eligibility, calculate_time_context,
-            calculate_location_context, STYLE_ECONOMICS
+            calculate_location_context, calculate_intraday_state, STYLE_ECONOMICS
         )
         
         # 1. Opening Range (OR)
         or_data = calculate_opening_range(today_5min)
         or_range = or_data['or_range'] if or_data else None
         
+        # Determine OR High/Low Reference
+        day_high = context.get('day_high', close)
+        day_low = context.get('day_low', close)
+        or_h_ref = or_data.get('or_high') if or_data else plan.get('reference_levels', {}).get('or_estimate_high', day_high)
+        or_l_ref = or_data.get('or_low') if or_data else plan.get('reference_levels', {}).get('or_estimate_low', day_low)
+
         # 2. Expected Move (EM) Envelope
-        # prior_day_range comes from database.py but we need it from plan/context
-        # context['daily_3'][0] is yesterday
-        prev_day = context.get('daily_3', [{}])[0]
+        daily_3 = context.get('daily_3', [])
+        prev_day = daily_3[0] if daily_3 else {}
         prior_day_range = (prev_day.get('h', 0) - prev_day.get('l', 0)) if prev_day else 0
         em_envelope = calculate_expected_move_envelope(or_range, prior_day_range)
+        
+        # Absolute EM Levels for V-reversal detection
+        em_low_price = or_l_ref - em_envelope.get('expected_move_low', 0) if or_l_ref else close - 100
+        em_high_price = or_h_ref + em_envelope.get('expected_move_high', 0) if or_h_ref else close + 100
         
         # 3. Micro Context (Structural facts)
         micro_context = calculate_micro_context(
             bars_15min=last_15min,
             current_price=close,
-            support=plan.get('boundary_levels', {}).get('support_zone', 0),
-            resistance=plan.get('boundary_levels', {}).get('resistance_zone', 0),
-            pivot=plan.get('boundary_levels', {}).get('pivot_point', 0),
+            support=plan.get('reference_levels', {}).get('support', 0),
+            resistance=plan.get('reference_levels', {}).get('resistance', 0),
+            pivot=plan.get('reference_levels', {}).get('pivot', 0),
             atr_14=atr,
-            or_range=em_envelope.get('or_range', 0)
+            or_range=em_envelope.get('or_range', 0),
+            em_low=em_low_price,
+            em_high=em_high_price
         )
         
         # 4. Time Context (Canonical Section 1)
@@ -405,26 +448,40 @@ class LLMClient:
         # 5. Location Context (Canonical Section 3)
         location_context = calculate_location_context(
             current_price=close,
-            support=plan.get('boundary_levels', {}).get('support_zone', 0),
-            pivot=plan.get('boundary_levels', {}).get('pivot_point', 0),
-            resistance=plan.get('boundary_levels', {}).get('resistance_zone', 0),
+            support=plan.get('reference_levels', {}).get('support', 0), # New Key
+            pivot=plan.get('reference_levels', {}).get('pivot', 0),
+            resistance=plan.get('reference_levels', {}).get('resistance', 0),
             or_range=em_envelope.get('or_range', 0)
         )
         
-        # 6. Style Eligibility (PHASE-2.5: Authoritative Filters)
+        # 6. Intraday State Machine (Rule Dispatcher)
+        # Determine OR High/Low (already calculated above)
+        intraday_state, state_reason = calculate_intraday_state(
+             current_price=close,
+             or_high=or_h_ref,
+             or_low=or_l_ref,
+             bars_15min=last_15min,
+             atr=atr
+        )
+        # Log State
+        logger.debug(f"      🚦 Intraday State: {intraday_state} ({state_reason})")
+        
+        today_5min = context.get('today_5min', [])
         eligible_styles = calculate_style_eligibility(
             current_time_str=current_time_str,
             micro_context=micro_context,
             morning_plan=plan,
             or_data=or_data,
             current_price=close,
-            expected_move=em_envelope
+            expected_move=em_envelope,
+            today_5min=today_5min,
+            intraday_state=intraday_state
         )
         
         # Log eligibility matrix for observability
-        logger.info(f"   📋 Style Eligibility Matrix: {json.dumps(eligible_styles, indent=2)}")
+        logger.debug(f"   📋 Style Eligibility Matrix: {json.dumps(eligible_styles, indent=2)}")
         
-        # 7. Economic Context (Dynamic Target based on EM High)
+        # 8. Economic Context
         target_pts = em_envelope.get('expected_move_high', 40)
         economic_context = calculate_economic_context(
             current_price=close,
@@ -455,13 +512,12 @@ class LLMClient:
             day_range_pts=round(day_range_pts, 1),
             vix=round(safe_f(vix), 1),
             atr=round(safe_f(atr), 1),
-            market_personality=plan.get('market_personality', 'CHOPPY'),
-            primary_bias=plan.get('primary_bias', 'NEUTRAL'),
-            bias_strength=plan.get('bias_strength', 'FRAGILE'),
-            support=round(plan.get('boundary_levels', {}).get('support_zone', 0), 1),
-            pivot=round(plan.get('boundary_levels', {}).get('pivot_point', 0), 1),
-            resistance=round(plan.get('boundary_levels', {}).get('resistance_zone', 0), 1),
-            invalidation_level=plan.get('invalidation_level', 'N/A'),
+            intraday_state=intraday_state,
+            state_reason=state_reason,
+            risk_regime=plan.get('risk_regime', {}).get('regime', 'NORMAL'),
+            support=round(plan.get('reference_levels', {}).get('support', 0), 1),
+            pivot=round(plan.get('reference_levels', {}).get('pivot', 0), 1),
+            resistance=round(plan.get('reference_levels', {}).get('resistance', 0), 1),
             bars_15m=bars_15m,
             last_5m_closes=last_5m_closes,
             swing_context=micro_context.get('swing_context', 'UNKNOWN'),
@@ -477,16 +533,32 @@ class LLMClient:
             position_state=position_state,
             unrealized_pnl=round(current_pnl, 1),
             day_pnl=round(day_pnl, 1),
-            consecutive_sl=0 # Placeholder
+            consecutive_sl=0 if intraday_state in ["TREND_UP", "TREND_DOWN"] else context.get('consecutive_sl', 0) # Guard: Skip cooling if Trending
         )
         
-        logger.info(f"\n--- 👷 WORKER INPUT (TACTICAL) ---\n{prompt}\n--------------------------------")
+        # Post-processing for eligible_styles (as per instruction)
+        # STYLE 3: INTRADAY_TREND_CONTINUATION (ITC)
+        # Allowed if State Machine detects TREND or if we have STABLE break or V-Reversal
+        v_rev = micro_context.get('v_reversal', False)
+        has_break = micro_context.get('structural_break', False)
+        if intraday_state in ["TREND_UP", "TREND_DOWN"] or v_rev or has_break:
+            eligible_styles["INTRADAY_TREND_CONTINUATION"] = True
+
+        logger.debug(f"\n--- 👷 WORKER INPUT (TACTICAL) ---\n{prompt}\n--------------------------------")
         
-        # ROUTING: BRAIN with purpose-specific system prompt (Was WORKER)
+        # ROUTING: BRAIN with purpose-specific system prompt
         data = self._query_model(SYSTEM_PROMPT_TACTICAL, prompt)
         
         if data:
             # --- NORMALIZATION (MANDATORY UPGRADE) ---
+            
+            # [Existing Time/Mode Normalization Logic - omitted for brevity if unchanged, but keeping context]
+            # ... (Assume surrounding code handles this via careful chunk replacement if I were rewriting whole file, but here I am targeting specific block).
+            # Wait, sticking to contiguous block replacement, I must include the whole block if I want to edit effectively.
+            
+            # Let's perform the prompt update first. The Guards logic (Opportunity Recovery) is further down.
+            pass
+
             
             # 1. Deterministic Mode and Late Session Gate
             try:
@@ -572,30 +644,99 @@ class LLMClient:
                 logger.warning(f"      🚨 LLM Hallucinated Massive Target: {old_tgt} | Capped to {data['target_points']} (3x ATR)")
                 data['reason'] = f"(Target Capped) {data.get('reason', '')}"
 
+            # --- PHASE-2.5: INJECT MICRO-CONTEXT FOR GUARDS & LOGIC ---
+            data['micro_context'] = {
+                'impulse_detected': micro_context.get('impulse_detected', False),
+                'failure_to_accept': micro_context.get('failure_to_accept', False),
+                'impulse_move_pts': micro_context.get('impulse_move_pts', 0.0),
+                'velocity_increasing': micro_context.get('velocity_increasing', False),
+                'last_body_ratio': micro_context.get('last_body_ratio', 0.0),
+                'net_progress_3': micro_context.get('net_progress_3', 0.0),
+                'absorption': micro_context.get('absorption', False),
+                'stall_at_level': micro_context.get('stall_at_level', False),
+                'failure_to_extend': micro_context.get('failure_to_extend', False),
+                'weak_follow_through': micro_context.get('weak_follow_through', False),
+                'rejection': micro_context.get('rejection', False),
+                'structural_break': micro_context.get('structural_break', False),
+                'break_direction': micro_context.get('break_direction', 'NEUTRAL')
+            }
+
             # --- PHASE-2.5: STRATEGIC REMR GUARD (Physical Enforcement) ---
             selected_style = data.get('selected_style', 'NONE')
             if selected_style == 'REMR' and action in ['BUY_CALL', 'BUY_PUT']:
                 location = location_context.get('location', 'MID_RANGE')
                 
-                # Rule: Resistance -> BUY_PUT
-                if location in ['NEAR_RESISTANCE', 'OPTIMAL_TOP'] and action == 'BUY_CALL':
-                    logger.warning(f"      🛡️ REMR Guard: Flipped BUY_CALL to BUY_PUT at {location}")
-                    data['action'] = "BUY_PUT"
-                    data['reason'] = f"(Guard Flipped) {data['reason']}"
+                # Retrieve advanced micro-context metrics
+                # FIX: Use local micro_context variable instead of data.get (Silent Bug Fix)
+                velocity_increasing = micro_context.get('velocity_increasing', False)
+                last_body_ratio = micro_context.get('last_body_ratio', 0.0)
+                absorption = micro_context.get('absorption', False)
                 
-                # Rule: Support -> BUY_CALL
+                stall = micro_context.get('stall_at_level', False)
+                failure = micro_context.get('failure_to_extend', False) # Failure to Extend
+                rejection = micro_context.get('rejection', False)
+                weak_ft = micro_context.get('weak_follow_through', False)
+                
+                # Check Flip Conditions
+                flip_candidate = False
+                target_side = None
+                
+                if location in ['NEAR_RESISTANCE', 'OPTIMAL_TOP'] and action == 'BUY_CALL':
+                    flip_candidate = True
+                    target_side = "BUY_PUT"
                 elif location in ['NEAR_SUPPORT', 'OPTIMAL_BOTTOM'] and action == 'BUY_PUT':
-                    logger.warning(f"      🛡️ REMR Guard: Flipped BUY_PUT to BUY_CALL at {location}")
-                    data['action'] = "BUY_CALL"
-                    data['reason'] = f"(Guard Flipped) {data['reason']}"
+                    flip_candidate = True
+                    target_side = "BUY_CALL"
+                
+                if flip_candidate:
+                    # 1. CONTINUATION RISK CHECK (Do NOT Flip If...)
+                    continuation_risk = False
+                    
+                    # Risk A: Velocity increasing in direction of break
+                    # If we are BUY_CALL (original), we are betting ON continuation. 
+                    # If we flip to BUY_PUT, we are betting AGAINST it.
+                    # Risk exists if the CURRENT move (which we are flipping against) is strong.
+                    if velocity_increasing: continuation_risk = True # Momentum expanding into level
+                    
+                    # Risk B: Strong Candle Body Ratio (>0.6)
+                    if last_body_ratio > 0.6: continuation_risk = True # Marubozu-like close into level
+                    
+                    # Risk C: Net Progress is strong (no stall)
+                    # Implicit in velocity/body, but can use net_progress_N if needed.
+                    
+                    # 2. REJECTION CONFIRMATION (Only Flip If...)
+                    # We need at least 3 confirmation signals
+                    signals = [stall, failure, rejection, weak_ft, absorption]
+                    rejection_score = sum(1 for s in signals if s)
+                    
+                    if not continuation_risk and rejection_score >= 3:
+                        logger.warning(f"      🛡️ REMR Guard: Flipped {action} to {target_side} at {location} (Score: {rejection_score}/5)")
+                        data['action'] = target_side
+                        data['reason'] = f"(Guard Flipped) {data['reason']}"
+                    
+                    else:
+                        # FLIP REJECTED: Determine if we should HOLD or keep original (rare)
+                        # Usually if we are at resistance and model said BUY_CALL, but we don't flip to PUT,
+                        # we should probably HOLD rather than buying the breakout blindly unless it's a breakout style?
+                        # selected_style is REMR, so we are NOT trading breakouts.
+                        # So if we can't flip to Mean Reversion, we must HOLD (skip the breakout).
+                        logger.warning(f"      🛡️ REMR Guard: FLIP BLOCKED (Continuation Risk or Low Score {rejection_score}/5). Enforcing HOLD.")
+                        data['action'] = "HOLD"
+                        data['reason'] = f"REMR Flip Blocked: High Continuation Risk / Low Rejection Signal ({rejection_score}/5)"
             
             # --- PHASE-2.5: SINGLE POSITION GUARD (Anti-Pyramiding) ---
             # If we are already in a position, BLOCKED any new Entry signals.
             # This prevents LLM hallucinations from confusing the user or logs.
             if open_position and data['action'] in ['BUY_CALL', 'BUY_PUT']:
-                logger.warning(f"      🛡️ Position Guard: Blocked {data['action']} because position is already OPEN.")
+                logger.warning(f"      [ENGINE] 🛡️ Position Guard: Blocked {data['action']} because position is already OPEN.")
                 data['action'] = "HOLD"
                 data['reason'] = f"(System Fixed) Invalid Entry Signal while Position Open."
+
+            # --- PHASE-2.5: INJECT AUTHORITATIVE HOLD TIME ---
+            # Ensure Executor gets the correct Style-based time limit
+            sel_style = data.get('selected_style', 'NONE')
+            if sel_style in STYLE_ECONOMICS:
+                 data['max_hold_minutes'] = STYLE_ECONOMICS[sel_style]['max_hold_min']
             
             # --- CALCULATION (EXISTING LOGIC) ---
             
@@ -648,18 +789,340 @@ class LLMClient:
             data['sl_points'] = sl_points
             data['target_points'] = tgt_points
             
-            # --- PHASE-2.5: STYLE TRANSITION CONTEXT INJECTION ---
-            # Inject primitives needed for REMR -> ITC transition logic in Executor
-            data['micro_context'] = {
-                'impulse_detected': micro_context.get('impulse_detected', False),
-                'failure_to_accept': micro_context.get('failure_to_accept', False),
-                'impulse_move_pts': micro_context.get('impulse_move_pts', 0.0)
-            }
+            # --- SMART PHASE-2 UPDATES (Trend Day Performance Fixes) ---
+            
+            # 1. BIAS DECAY (Original)
+            morning_bias = plan.get('primary_bias', 'NEUTRAL')
+            bias_weight = time_context.get('bias_weight', 1.0)
+            effective_bias = morning_bias
+            if bias_weight < 0.3:
+                 effective_bias = "NEUTRAL (Decayed)"
+            
+            # 2. STRUCTURAL BREAK OVERRIDE (Trend Guard + Directional Alignment)
+            # This is a LATCHED STATE - only log when state CHANGES
+            current_break = data.get('micro_context', {}).get('structural_break', False)
+            break_dir = data.get('micro_context', {}).get('break_direction', 'NEUTRAL')
+            net_progress = data.get('micro_context', {}).get('net_progress_3', 0)
+            v_reversal = data.get('micro_context', {}).get('v_reversal', False)
+            
+            # --- GLOBAL TIME CONTEXT ---
+            # current_time_str is already calculated at the top of the function
+            current_hour = current_time_str.split(':')[0] if current_time_str != 'N/A' else '00'
+            try: hour_int = int(current_hour)
+            except: hour_int = 0
+            
+            # Update latched state
+            structural_break = False
+            if current_break and break_dir != 'NEUTRAL':
+                 # Check if state changed
+                 if self.structural_break_state != break_dir:
+                      # NEW BREAK or DIRECTION REVERSAL
+                      self.structural_break_state = break_dir
+                      self.structural_break_entry_done = False
+                      logger.warning(f"      [ENGINE] 🔓 STRUCTURAL BREAK DETECTED ({break_dir}) @ {close} -> Enforcing Trend Alignment")
+                 structural_break = True
+            elif not current_break and self.structural_break_state:
+                 # Break condition ended
+                 logger.warning(f"      [ENGINE] 🔒 STRUCTURAL BREAK ENDED (was {self.structural_break_state})")
+                 self.structural_break_state = None
+                 self.structural_break_entry_done = False
+            
+            # --- SYNERGY: DYNAMIC CONFIDENCE BOOST ---
+            # 1. Aligned Daily Progress (+0.10)
+            p_baseline = self.intraday_open if self.intraday_open else tick.get('open', close)
+            p_since_open = close - p_baseline
+            aligned_momentum = (p_since_open > 0 and action == 'BUY_CALL') or (p_since_open < 0 and action == 'BUY_PUT')
+            
+            # 2. Aligned Structural Break (+0.10)
+            break_aligned = (self.structural_break_state == 'BULLISH' and action == 'BUY_CALL') or \
+                            (self.structural_break_state == 'BEARISH' and action == 'BUY_PUT')
+            
+            # 3. Aligned with Day Open (is_aligned)
+            is_aligned = (break_aligned and p_since_open > 0) if action == 'BUY_CALL' else \
+                         (break_aligned and p_since_open < 0)
+            # Simpler check for alignment
+            is_aligned = (action == 'BUY_CALL' and p_since_open > 0) or (action == 'BUY_PUT' and p_since_open < 0)
+            
+            old_conf = data.get('confidence', 0)
+            boost = 0
+            if aligned_momentum: boost += 0.10
+            if break_aligned: boost += 0.10
+            if v_reversal and action == "BUY_CALL": boost += 0.10
+            
+            if boost > 0:
+                data['confidence'] = min(0.95, old_conf + boost)
+                logger.info(f"      [ENGINE] 🚀 SYNERGY BOOST: Confidence {old_conf:.2f} -> {data['confidence']:.2f} (+{boost:.2f})")
+
+            # 3. V-REVERSAL OVERRIDE (Phase-2.6 Synergy)
+            # Allows counter-trend reversal if extreme exhaustion + fast recovery detected
+            if v_reversal and action == "BUY_CALL" and self.structural_break_state == "BEARISH":
+                logger.warning(f"      [ENGINE] 💥 V-REVERSAL OVERRIDE: Allowing Long during Bearish Break.")
+                structural_break = False # Temporarily reset to allow the LLM signal
+            
+            # Use latched state for logic
+            if self.structural_break_state and structural_break:
+                  break_dir = self.structural_break_state
+                  
+                  # Progress since Open for Directional Alignment
+                  today_open = tick.get('open', close) # Open of the First bar
+                  progress_since_open = close - today_open
+                  
+                  # One-Way Hierarchy: Disable REMR completely when in Trend
+                  is_counter_trend = False
+                  if break_dir == 'BULLISH' and action == 'BUY_PUT': is_counter_trend = True
+                  if break_dir == 'BEARISH' and action == 'BUY_CALL': is_counter_trend = True
+                  
+                  if is_counter_trend:
+                       logger.warning(f"      [ENGINE] 🛑 BLOCKED COUNTER-TREND SIGNAL: {action} during {break_dir} Break.")
+                       data['action'] = "HOLD"
+                       data['reason'] = f"Counter-Trend Signal Blocked (Attempted {action} during {break_dir} Break)"
+                       data['engine_decision'] = "BLOCKED"
+                  else:
+                       # Force ITC style if REMR was selected
+                       if data.get('selected_style') in ['RANGE_EXTREME_MEAN_REVERSION', 'REMR']:
+                            data['selected_style'] = 'INTRADAY_TREND_CONTINUATION'
+                            data['engine_reason'] = f"Style Corrected to ITC (Aligned with {break_dir} Break)"
+                  
+                  effective_bias = f"{break_dir}_TREND (Structural Break)"
+
+            # 3. PHASE 2.5: BEHAVIORAL GATING & MOMENTUM CONFLICTS
+            rejection_pattern = micro_context.get('rejection_pattern', 'NONE')
+            m_slope = micro_context.get('momentum_slope', 0)
+            
+            # A. REMR Behavioral Gate (Section 3.A of Plan)
+            if data.get('selected_style') in ['RANGE_EXTREME_MEAN_REVERSION', 'REMR']:
+                # Rule: REMR must have a behavioral rejection signature
+                if rejection_pattern == 'NONE':
+                     # If early (<10:00), it's a hard block. Mid-day is a warning or reduction.
+                     hr_int = int(current_time_str.split(':')[0]) if current_time_str != 'N/A' else 9
+                     if hr_int < 10:
+                         logger.warning(f"      [ENGINE] 🛑 REMR BLOCKED (No Rejection): Candle lacks behavioral rejection signature at open.")
+                         data['action'] = "HOLD"
+                         data['reason'] = "REMR Blocked: No behavioral rejection candle detected in Opening Range."
+                         data['engine_decision'] = "BLOCKED"
+                
+                # B. Momentum-Location Conflict Filter (Section 3.D of Plan)
+                # BLOCK short if price > Pivot AND Momentum is upward
+                is_short = data['action'] == 'BUY_PUT'
+                is_long = data['action'] == 'BUY_CALL'
+                
+                if is_short and m_slope > 0 and close > pivot:
+                     logger.warning(f"      [ENGINE] 🛑 MOMENTUM CONFLICT: REMR Put blocked vs positive slope ({m_slope}) + price > pivot.")
+                     data['action'] = "HOLD"
+                     data['reason'] = "REMR Short Blocked: Momentum currently positive above pivot."
+                     data['engine_decision'] = "BLOCKED"
+                elif is_long and m_slope < 0 and close < pivot:
+                     logger.warning(f"      [ENGINE] 🛑 MOMENTUM CONFLICT: REMR Call blocked vs negative slope ({m_slope}) + price < pivot.")
+                     data['action'] = "HOLD"
+                     data['reason'] = "REMR Long Blocked: Momentum currently negative below pivot."
+                     data['engine_decision'] = "BLOCKED"
+
+            # C. Flip Intelligence (Section 3.E of Plan)
+            # Prevent oscillating bias unless rejection is present
+            if open_position and data['action'] != 'HOLD':
+                current_side = open_position['side']
+                new_action = data['action']
+                is_flip = (current_side == 'BUY_CALL' and new_action == 'BUY_PUT') or \
+                          (current_side == 'BUY_PUT' and new_action == 'BUY_CALL')
+                
+                if is_flip and rejection_pattern == 'NONE':
+                     logger.warning(f"      [ENGINE] 🛡️ FLIP BLOCKED: Bias flip attempted without rejection pattern.")
+                     data['action'] = "HOLD" # Or keep original? Usually HOLD is safer to exit first.
+                     data['reason'] = "Flip Intelligence: Bias flip blocked (no rejection pattern confirmed)."
+                     data['engine_decision'] = "BLOCKED"
+
+            # 4. TWO-STAGE TREND CONFIRMATION (Replaces impulsive overrides)
+            # Stage 1: Break Detected (already done above)
+            # Stage 2: Acceptance Confirmed (pullback failed to retrace >40% OR 2 closes beyond break)
+            
+            trend_acceptance_confirmed = False
+            failure_to_accept = micro_context.get('failure_to_accept', False)
+            impulse_detected = micro_context.get('impulse_detected', False)
+            retracement_depth = micro_context.get('retracement_depth', 'UNCERTAIN')
+            vol_behavior = micro_context.get('volume_behavior', 'NORMAL')
+            is_expanding_vol = 'EXPANDING' in vol_behavior
+            
+            if structural_break and not failure_to_accept:
+                 # CRITICAL FIX: Trend Acceptance requires ENERGY, not just location
+                 # Impulse = directional commitment, ExpandVol = participation urgency
+                 # Pullback is a TIMING filter, not a confirmation signal
+                 
+                 has_energy = impulse_detected or is_expanding_vol
+                 acceptable_pullback = retracement_depth in ['SHALLOW', 'NORMAL', 'UNCERTAIN']
+                 
+                 # SYNERGY TUNING: Restore strictness for reliability
+                 if v_reversal:
+                      high_conf_floor = 0.45 
+                 elif is_aligned:
+                      high_conf_floor = 0.55
+                 else:
+                      high_conf_floor = 0.70
+
+                 high_conf_aligned = data.get('confidence', 0) >= high_conf_floor
+                 
+                 if has_energy:
+                      # Energy detected - true acceptance
+                      trend_acceptance_confirmed = True
+                      logger.warning(f"      [ENGINE] ✅ TREND ACCEPTANCE (ENERGY): Impulse={impulse_detected}, ExpandVol={is_expanding_vol}, Pullback={retracement_depth}")
+                 elif acceptable_pullback and high_conf_aligned:
+                      # Steady grind - accept if confidence crosses the (now lower) floor
+                      trend_acceptance_confirmed = True
+                      logger.warning(f"      [ENGINE] ✅ TREND ACCEPTANCE (GRIND): Conf={data.get('confidence', 0):.2f}, Pullback={retracement_depth}, Aligned={is_aligned}")
+                 elif acceptable_pullback:
+                      # Pullback ok but NO energy or high confidence - this is drift, not commitment
+                      logger.warning(f"      [ENGINE] ⏳ PENDING ACCEPTANCE: Pullback={retracement_depth} but NO ENERGY (Need Energy or Conf >= {high_conf_floor})")
+                 else:
+                      logger.warning(f"      [ENGINE] ⏳ BREAK PENDING ACCEPTANCE: Retracement={retracement_depth}, Impulse={impulse_detected}, ExpandVol={is_expanding_vol}")
+
+            # --- FINAL GATE: MOMENTUM ALIGNMENT ---
+            # Section 3.D/Synergy fix: Even if structure is accepted, block if momentum is sharks-opposite
+            # This prevents entering a gap-up that is actively dropping (01-12 scenario)
+            m_slope = micro_context.get('momentum_slope', 0)
+            if action == 'BUY_CALL' and m_slope < -2 and not v_reversal:
+                 logger.warning(f"      [ENGINE] 🛑 MOMENTUM GATE: CALL blocked vs negative slope ({m_slope}).")
+                 trend_acceptance_confirmed = False
+                 if not open_position: # Only block new entry, don't exit if already in
+                      data['action'] = "HOLD"
+            elif action == 'BUY_PUT' and m_slope > 2:
+                 logger.warning(f"      [ENGINE] 🛑 MOMENTUM GATE: PUT blocked vs positive slope ({m_slope}).")
+                 trend_acceptance_confirmed = False
+                 if not open_position:
+                      data['action'] = "HOLD"
+
+            # 4. DIRECTIONAL CONSISTENCY CHECK
+            # Override only if sign(ProgressSinceOpen) == sign(BreakDirection)
+            directional_consistent = False
+            today_open_baseline = self.intraday_open if self.intraday_open else tick.get('open', close)
+            p_since_open = close - today_open_baseline
+            if break_dir == 'BULLISH' and p_since_open >= 0: directional_consistent = True
+            if break_dir == 'BEARISH' and p_since_open <= 0: directional_consistent = True
+            
+            if structural_break and not directional_consistent:
+                 # SYNERGY: If confidence is high (>0.75) OR V-Reversal OR Late-Day
+                 # trust the break over the open-baseline.
+                 is_late = hour_int >= 11 # 11:00 AM onwards, trust the new trend
+                 if data.get('confidence', 0) >= 0.75 or v_reversal or is_late:
+                      directional_consistent = True
+                      reason = "Late Day" if is_late else ("V-Reversal" if v_reversal else "High Conf")
+                      logger.warning(f"      [ENGINE] 🔓 TRUSTING BREAK ({reason}) despite Directional Mismatch (Conf={data.get('confidence', 0):.2f})")
+                 else:
+                      logger.warning(f"      ⚠️ DIRECTIONAL MISMATCH: Break={break_dir} but NetProgress={p_since_open:.1f} -> Skipping override")
+
+            # 5. OPPORTUNITY RECOVERY GATE (Force Entry ONLY if confirmed)
+            is_opportunity_recovery = False
+            
+            if hour_int >= 11 and day_pnl == 0 and open_position is None:
+                 day_high = data.get('day_high', 0)
+                 day_low = data.get('day_low', 0)
+                 realized_range = day_high - day_low
+                 em_high = em_envelope.get('expected_move_high', 100)
+                 
+                 if realized_range > 0.7 * em_high:
+                      is_opportunity_recovery = True
+                      logger.warning(f"      🔓 OPPORTUNITY RECOVERY ACTIVE: Range={realized_range:.0f} > 0.7*EM")
+                      # Boost confidence for recovery attempts
+                      data['confidence'] = max(data.get('confidence', 0), 0.85)
+
+            # 6. CONDITIONAL COOLING (Expansion Override)
+            is_cooling = False
+            if "10:00" <= current_time_str <= "10:30":
+                 velocity_inc = data.get('micro_context', {}).get('velocity_increasing', False)
+                 day_range = data.get('day_high', 0) - data.get('day_low', 0)
+                 or_range_val = em_envelope.get('or_range', 50)
+                 range_expanding = day_range > 1.2 * or_range_val
+                 
+                 if velocity_inc or (structural_break and trend_acceptance_confirmed) or range_expanding:
+                      logger.warning(f"      🔥 COOLING SKIPPED (Expansion): VelInc={velocity_inc}, TrendAccept={trend_acceptance_confirmed}")
+                      is_cooling = False
+                 else:
+                      is_cooling = True
+                      
+            if is_cooling:
+                 data['engine_decision'] = "BLOCKED"
+                 data['engine_reason'] = "Market Cooling Period (10:00-10:30)"
+            
+            # --- DISCIPLINED TREND ENTRY (Replaces blind overrides) ---
+            # ONLY enter if ALL conditions are met:
+            # 1. structural_break = True
+            # 2. trend_acceptance_confirmed = True
+            # 3. directional_consistent = True
+            # 4. action == HOLD (LLM is conservative)
+            # 5. Not already in position
+            
+            required_conf = 0.70
+            selected_style = data.get('selected_style', '')
+            atr_val = data.get('atr', 50)
+            
+            # Qualified Trend Entry
+            qualified_trend_entry = (
+                 structural_break and 
+                 trend_acceptance_confirmed and 
+                 directional_consistent and 
+                 data['action'] == 'HOLD' and 
+                 open_position is None
+            )
+            
+            if qualified_trend_entry:
+                 current_conf = float(data.get('confidence', 0))
+                 
+                 # Lowered threshold for confirmed trends
+                 if current_conf >= 0.25 or is_opportunity_recovery:
+                      # HARD GEOMETRY SWITCH: Use ITC geometry, NOT REMR
+                      data['selected_style'] = 'INTRADAY_TREND_CONTINUATION'
+                      data['confidence'] = 0.75
+                      
+                      # ITC Geometry: 50pt SL, 90pt TGT (R:R = 1.8 to pass guard)
+                      if break_dir == 'BULLISH':
+                           data['action'] = 'BUY_CALL'
+                           data['sl'] = round(close - 50, 2)
+                           data['target'] = round(close + 90, 2)
+                      elif break_dir == 'BEARISH':
+                           data['action'] = 'BUY_PUT'
+                           data['sl'] = round(close + 50, 2)
+                           data['target'] = round(close - 90, 2)
+                      
+                      data['reason'] = f"(Confirmed Trend: {break_dir}, Acceptance ✓) {data['reason']}"
+                      logger.warning(f"      [ENGINE] 💥 DISCIPLINED TREND ENTRY: {data['action']} @ {close} (ITC Geometry: SL={data['sl']}, TGT={data['target']})")
+            
+            # If Opportunity Recovery but NO qualified trend, just boost confidence for LLM's signal
+            elif is_opportunity_recovery and data['action'] != 'HOLD':
+                 current_conf = float(data.get('confidence', 0))
+                 if current_conf >= 0.40 and current_conf < 0.8:
+                      data['confidence'] = 0.85
+                      data['reason'] = f"(Opp. Recovery Boost) {data['reason']}"
+                      logger.warning(f"      [ENGINE] 🚀 CONFIDENCE BOOSTED for Opportunity Recovery: {current_conf} -> 0.85")
+
+            
+            # RE-EVALUATE STYLE ELIGIBILITY WITH NEW BIAS
+            # (No re-calc needed, just applied in prompt or enforced below)
+            
+            # Update Payload for Prompt
+            data['primary_bias'] = effective_bias
+            data['is_opportunity_recovery'] = is_opportunity_recovery
             data['expected_move_high'] = em_envelope.get('expected_move_high', 0)
 
-            # Log AFTER all normalizations are applied
-            reason_short = reason[:40] + '...' if len(reason) > 40 else reason
-            logger.info(f"      🔸 {action} | Mode:{data['mode']} | Entry:{entry:.1f} | SL:{data['sl']} (-{sl_points:.1f}) | TGT:{data['target']} (+{tgt_points:.1f}) | {reason_short}")
+            # Log AFTER all normalizations are applied (Use data[] for post-guard values)
+            final_reason = data.get('reason', reason)
+            reason_short = final_reason[:40] + '...' if len(final_reason) > 40 else final_reason
+            logger.info(f"      [LLM] 🔸 {data['action']} | Mode:{data['mode']} | Entry:{entry:.1f} | SL:{data['sl']} (-{sl_points:.1f}) | TGT:{data['target']} (+{tgt_points:.1f}) | {reason_short}")
+            
+            # 7. TREND EXHAUSTION GATE (Phase 2.5)
+            # Disable ITC if move already covered > 1.2 * EM and volume is contracting
+            if data.get('selected_style') == 'INTRADAY_TREND_CONTINUATION' and data['action'] != 'HOLD':
+                em_high = em_envelope.get('expected_move_high', 100)
+                # Proxy displacement move since break
+                day_high = context.get('day_high', close)
+                day_low = context.get('day_low', close)
+                realized_move = day_high - day_low
+                # 2. Volume expansion check (Canonical Primitive)
+                # Use local micro_context (Authoritative)
+                vol_behavior = micro_context.get('volume_behavior', 'NORMAL')
+                
+                if realized_move > 1.2 * em_high and 'CONTRACTING' in vol_behavior:
+                    logger.warning(f"      [ENGINE] 🛑 TREND EXHAUSTED: Move={realized_move:.0f} > 1.2*EM ({em_high:.0f}) + Vol Contraction.")
+                    data['action'] = "HOLD"
+                    data['reason'] = f"Trend Exhaustion Gate: Realized move ({realized_move:.0f}) exceeded 1.2*EM and volume is contracting."
+                    data['engine_decision'] = "BLOCKED"
         
         return data
 
