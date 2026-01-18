@@ -104,3 +104,12 @@ The system is divided into two distinct authorities. Understanding this is criti
 - **The Reality**: Third-party services (n8n, frontends) often use hardcoded templates or only extract specific fields. Adding a new key like `'balance'` to the JSON is useless if the `message` string isn't updated to include it.
 - **The Fix**: **Explicit Text Injection**. If you want data to be visible, inject it directly into the `message` (Status) or `reason` (Trace) string fields.
 - **Verification Rule**: Use `print(f"<<<TELEGRAM {type}>>> {json_str} <<<END>>>")` in `base_mode.py` to visually inspect the exact payload leaving the engine. Do not guess.
+
+### The "Tuple Unpacking" Trap (Phase 2.7 Learning)
+- **The Pitfall**: `ValueError: not enough values to unpack (expected 3, got 2)` after changing a function signature.
+- **Wrong Assumption**: Docker container caching `.pyc` files, Python module import issues, need to restart/rebuild.
+- **Reality**: An **early return statement** in the function still used the old signature.
+- **The Mistake**: Wasted 10+ minutes on Docker restarts, cache clearing, when the fix was a single line of code.
+- **The Fix**: When changing function return values, **grep ALL return statements** in that function first.
+- **Example**: Changed `calculate_trend_efficiency` to return `(ter, regime, regime_momentum)`, but line 193 early return still had `return 0.0, "ROTATION"` (missing 3rd value).
+- **Rule**: `git grep "return" <filename>` before assuming infrastructure issues. Code first, Docker second.
