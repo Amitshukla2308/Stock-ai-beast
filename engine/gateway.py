@@ -9,15 +9,24 @@ import sys
 import os
 
 # Configure Logging (Dual Output)
-log_dir = "/app/logs"
+# Configure Logging (Dual Output: File=DEBUG, Console=INFO)
+log_dir = os.path.join(os.getcwd(), "logs_v2")
 os.makedirs(log_dir, exist_ok=True)
+
+# File Handler (Detailed)
+file_handler = logging.FileHandler(f"{log_dir}/beast_engine.log", mode='a')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+
+# Console Handler (Clean UI)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+# Use a simpler format for console if desired, or keep standard
+console_handler.setFormatter(logging.Formatter('%(message)s')) # Cleaner message-only for console
+
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(f"{log_dir}/beast_engine.log", mode='a'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    level=logging.DEBUG, # Capture all at root level
+    handlers=[file_handler, console_handler]
 )
 # Silence noisy libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -34,7 +43,7 @@ def check_token():
     if not validate_live_session(token):
         logging.error("❌ Fyers Token Invalid (Live Check Failed)!")
         # Attempt to delete the invalid file to force refresh next time
-        try: os.remove("/app/projects/stock-ai-beast/fyers_token.json") 
+        try: os.remove("fyers_token.json") 
         except: pass
         raise Exception("Login required (Token Invalid)")
         
@@ -47,21 +56,33 @@ def get_engine(mode, args=None):
     if mode == 'backtest':
         symbol = args.symbol if args else "NIFTY"
         
-        if args and args.start_date and args.end_date:
+        if args and args.start_date:
             start_date = datetime.strptime(args.start_date, "%Y-%m-%d")
-            end_date = datetime.strptime(args.end_date, "%Y-%m-%d")
-            days = (end_date - start_date).days + 1
+            if args.end_date:
+                end_date = datetime.strptime(args.end_date, "%Y-%m-%d")
+                days = (end_date - start_date).days + 1
+            else:
+                # Start Date + Days (default 1)
+                days = args.days if args and args.days else 1
+                end_date = start_date + timedelta(days=days-1)
         else:
-            days = args.days if args else 5
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days)
+            # Lookback Mode (End Date + Days OR Default)
+            days = args.days if args and args.days else 5
+            if args and args.end_date:
+                end_date = datetime.strptime(args.end_date, "%Y-%m-%d")
+            else:
+                end_date = datetime.now()
+            start_date = end_date - timedelta(days=days-1)
 
         # AUTO-PREFILL: Ensure data exists before simulating
         # AUTO-PREFILL: Ensure data exists before simulating
         try:
             # Emit Status
-            print(f"\n<<<TELEGRAM STATUS>>> {{\"msg\": \"🔐 Validating Fyers Token...\"}} <<<END>>>\n")
-            check_token() # 0. VALIDATE AUTH
+            # Skip token validation for backtests if requested or by default
+            if mode != 'backtest':
+                check_token() # 0. VALIDATE AUTH
+            else:
+                logging.debug("      ⏭️ Skipping Fyers Token validation for Backtest Mode.")
 
             print(f"\n<<<TELEGRAM STATUS>>> {{\"msg\": \"⏳ Prefilling Data for {symbol} ({days} days)...\"}} <<<END>>>\n")
             from data.prefill import run as run_prefill
@@ -87,7 +108,7 @@ def get_engine(mode, args=None):
             raise e # CRITICAL: Stop execution if prefill fails
         
         balance = args.balance if args and hasattr(args, 'balance') else 30000
-        return BacktestMode(start_date=start_date, end_date=end_date, symbol=symbol, initial_balance=balance, chat_id=args.chat_id)
+        return BacktestMode(start_date=start_date, end_date=end_date, symbol=symbol, resolution=res, initial_balance=balance, chat_id=args.chat_id)
         
     elif mode == 'mock':
         debug = args.debug_schedule if args else False

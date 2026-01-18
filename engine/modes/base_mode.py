@@ -47,7 +47,7 @@ class BaseMode(ABC):
             json_str = json.dumps(clean_payload)
             
             # 1. Print to Stdout (Legacy/Fallback + Logging)
-            print(f"\n<<<TELEGRAM {event_type}>>> {json_str} <<<END>>>\n")
+            # print(f"\n<<<TELEGRAM {event_type}>>> {json_str} <<<END>>>\n")
             
             # 2. Push to n8n Webhook with retry logic for 429
             webhook_url = "http://host.docker.internal:5678/webhook/telegram-push"

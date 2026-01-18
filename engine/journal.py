@@ -22,7 +22,9 @@ class Journal:
                 entry_time TIMESTAMP,
                 exit_time TIMESTAMP,
                 max_pnl FLOAT,
-                mean_open_pnl FLOAT
+                mean_open_pnl FLOAT,
+                style VARCHAR,
+                entry_reason VARCHAR
             )
         """)
         
@@ -60,9 +62,16 @@ class Journal:
                 print("   🛠️ Migrating 'simulation_trades': Adding max_pnl column...")
                 conn.execute("ALTER TABLE simulation_trades ADD COLUMN max_pnl FLOAT")
             
-            if 'mean_open_pnl' not in cols_trades:
                 print("   🛠️ Migrating 'simulation_trades': Adding mean_open_pnl column...")
                 conn.execute("ALTER TABLE simulation_trades ADD COLUMN mean_open_pnl FLOAT")
+
+            if 'style' not in cols_trades:
+                print("   🛠️ Migrating 'simulation_trades': Adding style column...")
+                conn.execute("ALTER TABLE simulation_trades ADD COLUMN style VARCHAR")
+                
+            if 'entry_reason' not in cols_trades:
+                print("   🛠️ Migrating 'simulation_trades': Adding entry_reason column...")
+                conn.execute("ALTER TABLE simulation_trades ADD COLUMN entry_reason VARCHAR")
 
             cols_logs = [r[1] for r in conn.execute("PRAGMA table_info('simulation_logs')").fetchall()]
             if 'session_id' not in cols_logs:
@@ -86,8 +95,8 @@ class Journal:
         conn = get_connection()
         conn.execute("""
             INSERT INTO simulation_trades (
-                session_id, timestamp, side, entry_price, exit_price, pnl, reason, entry_time, exit_time, max_pnl, mean_open_pnl
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                session_id, timestamp, side, entry_price, exit_price, pnl, reason, entry_time, exit_time, max_pnl, mean_open_pnl, style, entry_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             self.session_id,
             datetime.now(), # Log time
@@ -99,7 +108,9 @@ class Journal:
             trade['entry_time'],
             trade['exit_time'],
             trade.get('max_pnl', 0),
-            trade.get('mean_open_pnl', 0)
+            trade.get('mean_open_pnl', 0),
+            trade.get('style', 'N/A'),
+            trade.get('entry_reason', 'N/A')
         ))
         conn.close()
 

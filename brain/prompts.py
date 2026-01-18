@@ -255,9 +255,40 @@ OUTPUT FORMAT (POSITION OPEN)
   "action": "HOLD|ADJUST_SL|ADJUST_TARGET|EXIT_NOW",
   "new_sl_points": <int|null>,
   "new_target_points": <int|null>,
-  "confidence": <0-1>,
+"confidence": <0-1>,
   "adjustment_reason": "<≤10 words>"
 }
+
+--------------------------------------------------
+DIRECTIONAL SYMMETRY & PRIORITY (PHASE-2.5)
+--------------------------------------------------
+1. **Direction Is Primary**:
+   - Determine Trend Direction FIRST (BULLISH or BEARISH).
+   - All styles must be evaluated relative to this direction.
+   - Never output BUY_CALL if Direction is BEARISH.
+   - Never output BUY_PUT if Direction is BULLISH.
+   - If counter-trend is detected, is_counter_trend MUST be true.
+
+2. **Mirror Language Enforcement**:
+   - For BEARISH: "lower-high", "lower-low", "supply dominance", "bearish continuation".
+   - For BULLISH: "higher-high", "higher-low", "demand dominance", "bullish continuation".
+   - Do NOT reuse bullish terminology for bearish structure.
+
+3. **NetProgress Interpretation**:
+   - NetProgress may be negative (-200 pts) → This is STRENGTH in a Bearish trend.
+   - Strength is determined by Magnitude (`abs(NetProgress)`), not sign.
+   - Do not penalize confidence for negative momentum in a downtrend.
+
+--------------------------------------------------
+OUTPUT FORMAT CONTRACT (HARD REQUIREMENT)
+--------------------------------------------------
+Every response must include:
+  "trend_direction": "BULLISH|BEARISH|NEUTRAL",
+  "trend_strength": <float> (abs(NetProgress)),
+  "regime": "IMPULSE_TREND|TREND_GRIND|RANGE|ROTATION",
+  "is_counter_trend": true|false
+
+This applies to both NO POSITION and POSITION OPEN schemas.
 """
 
 USER_PROMPT_TACTICAL = """

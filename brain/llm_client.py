@@ -32,6 +32,22 @@ class LLMClient:
         self.structural_break_state = None  # None, 'BULLISH', or 'BEARISH'
         self.structural_break_entry_done = False  # Track if we already entered on this break
         self.intraday_open = None  # Persistent baseline for the day
+        
+        # New Regime Hysteresis State
+        self.regime_state = {
+            'current': 'ROTATION',
+            'candidate': 'ROTATION',
+            'age': 0,
+            'candidate_age': 0
+        }
+        
+        # New Regime Hysteresis State
+        self.regime_state = {
+            'current': 'ROTATION',
+            'candidate': 'ROTATION',
+            'age': 0,
+            'candidate_age': 0
+        }
 
     def wait_for_model_ready(self):
         """Blocks until the model responds effectively (handles lazy loading)"""
@@ -439,8 +455,15 @@ class LLMClient:
             atr_14=atr,
             or_range=em_envelope.get('or_range', 0),
             em_low=em_low_price,
-            em_high=em_high_price
+            em_high=em_high_price,
+            today_5min=today_5min
         )
+        
+        # --- PHASE-2 GEOMETRY: TELEMETRY (PART G) ---
+        ter_val = micro_context.get('trend_efficiency', 0.0)
+        t_regime = micro_context.get('trend_regime', 'ROTATION')
+        eff_atr_val = micro_context.get('effective_atr', atr)
+        logger.info(f"      [METRICS] TrendEfficiency={ter_val:.2f} Regime={t_regime} EffectiveATR={eff_atr_val} Exhaustion={micro_context.get('bearish_exhaustion', False)}")
         
         # 4. Time Context (Canonical Section 1)
         time_context = calculate_time_context(current_time_str)
@@ -571,9 +594,9 @@ class LLMClient:
                         data['mode'] = "OPENING_RANGE"
                     elif hr_min > 1000:
                         data['mode'] = "STRUCTURE"
+                        # 10:00-10:30 Cooling Period (Soft Gate in Conflict Resolver below)
                         if hr_min <= 1030:
-                            data['action'] = "HOLD"
-                            data['reason'] = "Market cooling period (10:00-10:30)"
+                            pass 
                     else:
                         data['mode'] = "UNKNOWN"
 
@@ -593,6 +616,316 @@ class LLMClient:
             except Exception as e:
                 logger.error(f"Error in mode normalization: {e}")
                 data['mode'] = "UNKNOWN"
+
+            # 2. Confidence Normalization
+            try:
+                conf_val = data.get('confidence', 0)
+                if conf_val is None or not isinstance(conf_val, (int, float)):
+                    conf_val = micro_context.get('confidence', 0.0)
+                
+                f_conf = float(conf_val)
+                if math.isnan(f_conf) or math.isinf(f_conf):
+                    f_conf = 0.0
+                data['confidence'] = max(0.0, min(1.0, f_conf))
+            except:
+                data['confidence'] = 0.0
+
+            # 3. Action Normalization
+            action = data.get('decision', data.get('action', 'HOLD'))
+            data['action'] = action
+            
+            # 4. Reason Normalization (HOLD must have a reason)
+            reason = data.get('reason', data.get('adjustment_reason', ''))
+            if action == 'HOLD' and not reason:
+                reason = "Market not in optimal zone for entry"
+            data['technical_reason'] = reason
+            data['reason'] = reason
+
+            # --- PHASE-2.5: PHYSICAL REASONABILITY GATING ---
+            raw_atr = context.get('atr_14', context.get('atr', 15))
+            try: atr = float(raw_atr)
+            except: atr = 15.0
+            
+            # SL Gating
+            sl = data.get('sl_points', 0)
+            if sl and isinstance(sl, (int, float)) and sl > 4 * atr:
+                old_sl = sl
+                data['sl_points'] = round(1.5 * atr)
+                logger.warning(f"      🚨 LLM Hallucinated Massive SL: {old_sl} | Capped to {data['sl_points']} (1.5x ATR)")
+                data['reason'] = f"(SL Capped) {data.get('reason', '')}"
+
+            # Target Gating
+            tgt = data.get('target_points', 0)
+            if tgt and isinstance(tgt, (int, float)) and tgt > 15 * atr:
+                old_tgt = tgt
+                data['target_points'] = round(3 * atr)
+                logger.warning(f"      🚨 LLM Hallucinated Massive Target: {old_tgt} | Capped to {data['target_points']} (3x ATR)")
+                data['reason'] = f"(Target Capped) {data.get('reason', '')}"
+
+            # --- PHASE-2.5: INJECT MICRO-CONTEXT FOR GUARDS & LOGIC ---
+            data['micro_context'] = {
+                'impulse_detected': micro_context.get('impulse_detected', False),
+                'failure_to_accept': micro_context.get('failure_to_accept', False),
+                'impulse_move_pts': micro_context.get('impulse_move_pts', 0.0),
+                'velocity_increasing': micro_context.get('velocity_increasing', False),
+                'last_body_ratio': micro_context.get('last_body_ratio', 0.0),
+                'net_progress_3': micro_context.get('net_progress_3', 0.0),
+                'absorption': micro_context.get('absorption', False),
+                'stall_at_level': micro_context.get('stall_at_level', False),
+                'failure_to_extend': micro_context.get('failure_to_extend', False),
+                'weak_follow_through': micro_context.get('weak_follow_through', False),
+                'rejection': micro_context.get('rejection', False),
+                'structural_break': micro_context.get('structural_break', False),
+                'break_direction': micro_context.get('break_direction', 'NEUTRAL'),
+                # Phase-2 Geometry Metrics
+                'trend_efficiency': micro_context.get('trend_efficiency', 0.0),
+                'trend_regime': micro_context.get('trend_regime', 'ROTATION'),
+                'effective_atr': micro_context.get('effective_atr', atr),
+                'bearish_exhaustion': micro_context.get('bearish_exhaustion', False),
+                # New Metrics (Trend Grind / REMR)
+                'is_grind': micro_context.get('is_grind', False),
+                'vwap_rejection': micro_context.get('vwap_rejection', False),
+                'two_bar_failure': micro_context.get('two_bar_failure', False)
+            }
+            
+            # --- REGIME HYSTERESIS LOGIC ---
+            raw_regime = micro_context.get('trend_regime', 'ROTATION')
+            if micro_context.get('is_grind'): raw_regime = 'TREND_GRIND' # Override raw with Grind specific
+            
+            # Priority: IMPULSE_TREND > TREND_GRIND > RANGE (ROTATION)
+            # Normalization map
+            if raw_regime == 'TREND': raw_regime = 'IMPULSE_TREND' 
+            if raw_regime == 'ROTATION': raw_regime = 'RANGE' 
+            
+            # Update State
+            current = self.regime_state['current']
+            candidate = self.regime_state['candidate']
+            
+            if raw_regime == current:
+                self.regime_state['age'] += 1
+                self.regime_state['candidate_age'] = 0
+            else:
+                if raw_regime == candidate:
+                    self.regime_state['candidate_age'] += 1
+                else:
+                    self.regime_state['candidate'] = raw_regime
+                    self.regime_state['candidate_age'] = 1
+                
+                # Switch Condition (>= 2 bars)
+                if self.regime_state['candidate_age'] >= 2:
+                    new_reg = self.regime_state['candidate']
+                    logger.info(f"      [REGIME] 🔄 SWITCH: {current} -> {new_reg} (Confirmed 2+ bars)")
+                    self.regime_state['current'] = new_reg
+                    self.regime_state['age'] = 1
+                    self.regime_state['candidate_age'] = 0
+            
+            # Authoritative Regime for this tick
+            active_regime = self.regime_state['current']
+            
+            # Inject into instructions for downstream logic
+            micro_context['active_regime'] = active_regime
+            data['active_regime'] = active_regime
+
+            # --- NEW METRIC: DIRECTIONAL PROGRESS ---
+            # DirectionalProgress = sign(NetProgress) == sign(StructuralBias/Action)
+            # Used for Trend Confirmation
+            net_prog_3 = micro_context.get('net_progress_3', 0.0)
+            directional_progress = False
+            
+            # Determine authoritative bias (Break State > Morning Bias)
+            auth_bias_dir = 0
+            if self.structural_break_state == 'BULLISH': auth_bias_dir = 1
+            elif self.structural_break_state == 'BEARISH': auth_bias_dir = -1
+            else:
+                 mb = plan.get('primary_bias', 'NEUTRAL')
+                 if 'BULLISH' in mb: auth_bias_dir = 1
+                 elif 'BEARISH' in mb: auth_bias_dir = -1
+            
+            # If action is active, check against ACTION direction (Execution Alignment)
+            # Otherwise check against Bias
+            check_dir = auth_bias_dir
+            if action == 'BUY_CALL': check_dir = 1
+            elif action == 'BUY_PUT': check_dir = -1
+            
+            if check_dir == 1 and net_prog_3 > 0: directional_progress = True
+            elif check_dir == -1 and net_prog_3 < 0: directional_progress = True
+            
+            logger.debug(f"      [DIR] NetProgress={net_prog_3:.1f}, CheckDir={check_dir} -> DirectionalProgress={directional_progress}")
+
+            # --- PHASE-2.5: STRATEGIC REMR GUARD (Strict Rejection Validation) ---
+            selected_style = data.get('selected_style', 'NONE')
+            if selected_style in ['REMR', 'RANGE_EXTREME_MEAN_REVERSION'] and data['action'] in ['BUY_CALL', 'BUY_PUT']:
+                location = location_context.get('location', 'MID_RANGE')
+                
+                # Check for Valid Rejection Signature
+                # Rule: EXTREME Location AND (WickRatio > 0.6 OR TwoBarFailure OR CloseRejectsVWAP)
+                # Note: WickRatio is handled by detect_rejection_pattern returning TOP/BOTTOM_REJECTION only if ratio > 0.6
+                
+                has_rejection_pattern = micro_context.get('rejection_pattern') != 'NONE'
+                has_2bf = micro_context.get('two_bar_failure', False)
+                has_vwap_rej = micro_context.get('vwap_rejection', False)
+                
+                is_extreme = location in ['NEAR_RESISTANCE', 'OPTIMAL_TOP', 'NEAR_SUPPORT', 'OPTIMAL_BOTTOM']
+                valid_remr_signal = is_extreme and (has_rejection_pattern or has_2bf or has_vwap_rej)
+                
+                if not valid_remr_signal:
+                     # Allow fallback if standard rejection is very strong? No, strict per instructions.
+                     if not is_extreme:
+                          logger.warning(f"      [ENGINE] 🛑 REMR BLOCKED: Location {location} is not EXTREME.")
+                     else:
+                          logger.warning(f"      [ENGINE] 🛑 REMR BLOCKED: Missing Rejection Signature (Pat:{has_rejection_pattern}, 2BF:{has_2bf}, VWAP:{has_vwap_rej})")
+                     
+                     data['action'] = 'HOLD'
+                     data['reason'] = "REMR Blocked: Strict Rejection Criteria not met."
+                     data['engine_decision'] = "BLOCKED"
+
+            # --- PHASE-2.5: SINGLE POSITION GUARD ---
+            if open_position and data['action'] in ['BUY_CALL', 'BUY_PUT']:
+                logger.warning(f"      [ENGINE] 🛡️ Position Guard: Blocked {data['action']} because position is already OPEN.")
+                data['action'] = "HOLD"
+                data['reason'] = f"(System Fixed) Invalid Entry Signal while Position Open."
+
+            # --- PHASE-2.5: INJECT AUTHORITATIVE HOLD TIME ---
+            sel_style = data.get('selected_style', 'NONE')
+            if sel_style in STYLE_ECONOMICS:
+                 data['max_hold_minutes'] = STYLE_ECONOMICS[sel_style]['max_hold_min']
+
+            # --- PHASE-2 GEOMETRY: GATES ---
+            ter = micro_context.get('trend_efficiency', 0.0)
+            is_grind = micro_context.get('is_grind', False)
+            eff_atr = micro_context.get('effective_atr', atr)
+
+            # 3. REGIME-SPECIFIC STYLE PERMISSIONS (TREND_GRIND)
+            active_regime = data.get('active_regime', 'RANGE')
+            
+            if active_regime == 'TREND_GRIND':
+                # A. ITC (Primary)
+                if selected_style in ['ITC', 'INTRADAY_TREND_CONTINUATION']:
+                    # Block at OPTIMAL_TOP (Buy Weakness Only)
+                    loc = location_context.get('location', 'MID')
+                    if loc in ['OPTIMAL_TOP', 'EXTENSION_ZONE', 'NEAR_RESISTANCE']:
+                        logger.warning(f"      [ENGINE] 🛑 GRIND BLOCK: ITC blocked at {loc} (Buy weakness only).")
+                        data['action'] = "HOLD"
+                        data['reason'] = f"ITC in Grind Blocked: Location {loc} (Requires Pullback/Bottom)"
+                        data['engine_decision'] = "BLOCKED"
+                    
+                    # Geometry Adjustment (Override with Tight Params)
+                    # SL = 0.7 * ATR, TGT = 1.4 * ATR
+                    if data['action'] != 'HOLD':
+                        data['sl_points'] = round(0.7 * atr)
+                        data['target_points'] = round(1.4 * atr)
+                        data['manual_geometry'] = True 
+                        logger.info(f"      [GEOMETRY] 📐 GRIND ITC: SL {data['sl_points']} | TGT {data['target_points']} (Tight)")
+                
+                # B. ORE (Early Only)
+                elif selected_style == 'OPENING_RANGE_EXPANSION':
+                    # Only < 10:00
+                    hr_now = int(current_time_str.split(':')[0]) if current_time_str != 'N/A' else 9
+                    if hr_now >= 10:
+                        logger.warning(f"      [ENGINE] 🛑 GRIND BLOCK: ORE blocked after 10:00.")
+                        data['action'] = "HOLD"
+                        data['engine_decision'] = "BLOCKED"
+                
+                # C. REMR (Strict Block)
+                elif selected_style in ['REMR', 'RANGE_EXTREME_MEAN_REVERSION']:
+                    # Allowed ONLY if Exhaustion + Extreme
+                    is_exhausted = micro_context.get('bearish_exhaustion', False) 
+                    loc = location_context.get('location', 'MID')
+                    is_extreme = loc in ['NEAR_RESISTANCE', 'OPTIMAL_TOP', 'NEAR_SUPPORT', 'OPTIMAL_BOTTOM']
+                    
+                    if not (is_exhausted and is_extreme):
+                        logger.warning(f"      [ENGINE] 🛑 GRIND BLOCK: REMR blocked. (Grind = Trap)")
+                        data['action'] = "HOLD"
+                        data['engine_decision'] = "BLOCKED"
+                        data['reason'] = "REMR Blocked in TREND_GRIND"
+                
+                # D. VBD (Block)
+                elif selected_style == "VOLATILITY_BREAK_DISCOVERY":
+                     logger.warning(f"      [ENGINE] 🛑 GRIND BLOCK: VBD blocked in Grind.")
+                     data['action'] = "HOLD"
+                     data['engine_decision'] = "BLOCKED"
+            
+            # 1. ORE Gate
+            if sel_style == "OPENING_RANGE_EXPANSION" or data.get('mode') == "DISCOVERY":
+                if ter < 0.50:
+                    logger.warning(f"      [ENGINE] 🛑 ORE BLOCKED: Low Trend Efficiency ({ter:.2f} < 0.50).")
+                    data['action'] = "HOLD"
+                    data['reason'] = f"ORE Blocked: Trend Efficiency too low ({ter:.2f})"
+                    data['engine_decision'] = "BLOCKED"
+            
+            # 2. ITC Gate (Dual-Path)
+            if sel_style in ["INTRADAY_TREND_CONTINUATION", "ITC"]:
+                # Path A: Standard Trend
+                path_a_ok = (ter >= 0.55)
+                
+                # Path B: Trend Grind (Slow directional drift)
+                # Allow ITC when: TER >= 0.25 AND DirectionalProgress == True AND (implicit VolContraction in is_grind)
+                path_b_ok = (is_grind and ter >= 0.25 and directional_progress)
+                
+                if not (path_a_ok or path_b_ok):
+                    logger.warning(f"      [ENGINE] 🛑 ITC BLOCKED: Fails Standard (TER {ter:.2f}) and GRIND (Grind={is_grind}, Dir={directional_progress})")
+                    data['action'] = "HOLD"
+                    data['reason'] = f"ITC Blocked: Insufficient Trend Quality or Directionality."
+                    data['engine_decision'] = "BLOCKED"
+                elif path_b_ok:
+                    logger.info(f"      [REGIME] 🐢 TREND_GRIND Active: Allowing ITC with TER {ter:.2f}")
+
+            # 3. Momentum Gate Symmetry (No directional bias, just alignment)
+            # Enforce: CALL allowed only if MomentumSlope > 0, PUT only if < 0
+            m_slope = micro_context.get('momentum_slope', 0)
+            if data['action'] == 'BUY_CALL' and m_slope <= 0:
+                 # Exception: V-Reversal allows fighting momentum
+                 if not micro_context.get('v_reversal'):
+                      logger.warning(f"      [ENGINE] 🛑 MOMENTUM SYMETRY BLOCK: CALL requires Positive Slope (Got {m_slope}).")
+                      data['action'] = 'HOLD'
+                      data['reason'] = "Momentum Mismatch: CALL requires positive momentum."
+            elif data['action'] == 'BUY_PUT' and m_slope >= 0:
+                 if not micro_context.get('v_reversal'):
+                      logger.warning(f"      [ENGINE] 🛑 MOMENTUM SYMETRY BLOCK: PUT requires Negative Slope (Got {m_slope}).")
+                      data['action'] = 'HOLD'
+                      data['reason'] = "Momentum Mismatch: PUT requires negative momentum."
+
+            # 4. Conflict Resolver Priority
+            # Structure > Velocity > Time
+            structural_break = micro_context.get('structural_break', False)
+            impulse_detected = micro_context.get('impulse_detected', False)
+            expand_vol = 'EXPANDING' in micro_context.get('volume_behavior', 'NORMAL')
+            
+            # Acceptance Reform: Impulse OR ExpandVol OR Grind
+            acceptance = impulse_detected or expand_vol or (is_grind and directional_progress)
+            
+            if structural_break and acceptance:
+                 logger.info("      [CONFLICT] ⚔️ STRUCTURE PRIORITY: Skipping Time/Velocity Gates.")
+                 # Soften Time Gates (Cooling)
+                 # Note: Cooling logic was skipped above (pass), logic is handled here or implicitly by not checking it again.
+                 
+                 # TER / NetProgress violations handled by ITC Path B logic above.
+                 # Counter-trend checks remain naturally as strictly enforced by Trend Acceptance logic below.
+            
+            # 6. CONDITIONAL COOLING (10:00-10:30)
+            # If we are in cooling period AND NOT Structure Priority
+            if "10:00" <= current_time_str <= "10:30":
+                 # Only block if we don't have Structure + Acceptance
+                 if not (structural_break and acceptance):
+                      # Check simple expansion as fallback?
+                      velocity_inc = micro_context.get('velocity_increasing', False)
+                      if not velocity_inc:
+                           data['action'] = "HOLD"
+                           data['engine_decision'] = "BLOCKED"
+                           data['reason'] = "Market Cooling Period (10:00-10:30) - No Structure/Expansion"
+
+            # --- ENTRY (CALCULATION) ---
+            close_price = tick.get('close', float(data.get('entry') or 0) or 0)
+            entry = float(data.get('entry') or 0)
+            if entry == 0: entry = float(close_price)
+            data['entry'] = entry
+            
+            # --- STRUCTURE LOGGING TAGS ---
+            regime = micro_context.get('trend_regime', 'ROTATION')
+            np_raw = micro_context.get('net_progress_3', 0.0)
+            logger.info(f"      [REGIME] {regime} | [DIR] {'OK' if directional_progress else 'MISMATCH'} | [STRENGTH] {abs(np_raw):.1f} | [ACCEPT] {'YES' if acceptance else 'NO'}")
+            
+            return data
 
             # 2. Confidence Normalization
             try:
@@ -658,7 +991,12 @@ class LLMClient:
                 'weak_follow_through': micro_context.get('weak_follow_through', False),
                 'rejection': micro_context.get('rejection', False),
                 'structural_break': micro_context.get('structural_break', False),
-                'break_direction': micro_context.get('break_direction', 'NEUTRAL')
+                'break_direction': micro_context.get('break_direction', 'NEUTRAL'),
+                # Phase-2 Geometry Metrics
+                'trend_efficiency': micro_context.get('trend_efficiency', 0.0),
+                'trend_regime': micro_context.get('trend_regime', 'ROTATION'),
+                'effective_atr': micro_context.get('effective_atr', atr),
+                'bearish_exhaustion': micro_context.get('bearish_exhaustion', False)
             }
 
             # --- PHASE-2.5: STRATEGIC REMR GUARD (Physical Enforcement) ---
@@ -737,6 +1075,97 @@ class LLMClient:
             sel_style = data.get('selected_style', 'NONE')
             if sel_style in STYLE_ECONOMICS:
                  data['max_hold_minutes'] = STYLE_ECONOMICS[sel_style]['max_hold_min']
+
+            # --- PHASE-2 GEOMETRY: EFFECTIVE ATR ---
+            # Use Effective ATR for R:R and Risk checks instead of raw ATR
+            # This fixes Directional Symmetry issues (Bear moves being faster/shorter)
+            eff_atr = micro_context.get('effective_atr', atr)
+            if isinstance(eff_atr, str): eff_atr = float(atr) if isinstance(atr, (int, float)) else 100.0
+
+            # --- PHASE-2 GEOMETRY: GATES ---
+            ter = micro_context.get('trend_efficiency', 0.0)
+            
+            # 1. ORE Gate (Breakout Validity)
+            if sel_style == "OPENING_RANGE_EXPANSION" or data.get('mode') == "DISCOVERY":
+                if ter < 0.50:
+                    logger.warning(f"      [ENGINE] 🛑 ORE BLOCKED: Low Trend Efficiency ({ter:.2f} < 0.50).")
+                    data['action'] = "HOLD"
+                    data['reason'] = f"ORE Blocked: Trend Efficiency too low ({ter:.2f})"
+                    data['engine_decision'] = "BLOCKED"
+            
+            # 2. ITC Gate (Continuation Validity)
+            if sel_style == "INTRADAY_TREND_CONTINUATION" or sel_style == "ITC":
+                net_prog = abs(micro_context.get('net_progress_3', 0))
+                if ter < 0.55 and net_prog < 0.5 * eff_atr:
+                    logger.warning(f"      [ENGINE] 🛑 ITC BLOCKED: TER ({ter:.2f}) < 0.55 or NetProgress ({net_prog}) < 0.5*ATR ({eff_atr}).")
+                    data['action'] = "HOLD"
+                    data['reason'] = f"ITC Blocked: Trend Quality Inefficient (TER {ter:.2f})"
+                    data['engine_decision'] = "BLOCKED"
+                    
+            # 3. REGIME-SPECIFIC STYLE PERMISSIONS (TREND_GRIND)
+            active_regime = data.get('active_regime', 'RANGE')
+            
+            if active_regime == 'TREND_GRIND':
+                # A. ITC (Primary)
+                if sel_style in ['ITC', 'INTRADAY_TREND_CONTINUATION']:
+                    # Block at OPTIMAL_TOP / EXTENSION
+                    loc = location_context.get('location', 'MID')
+                    if loc in ['OPTIMAL_TOP', 'EXTENSION_ZONE', 'NEAR_RESISTANCE']:
+                        logger.warning(f"      [ENGINE] 🛑 GRIND BLOCK: ITC blocked at {loc} (Buy weakness only).")
+                        data['action'] = "HOLD"
+                        data['reason'] = f"ITC in Grind Blocked: Location {loc} (Requires Pullback/Bottom)"
+                        data['engine_decision'] = "BLOCKED"
+                    
+                    # Geometry Adjustment (Pass to Executor via overrides)
+                    # SL = 0.7 * ATR, TGT = 1.4 * ATR
+                    # We calculate here and override instructions
+                    if data['action'] != 'HOLD':
+                        data['sl_points'] = round(0.7 * atr)
+                        data['target_points'] = round(1.4 * atr)
+                        data['manual_geometry'] = True # Signal for Executor
+                        logger.info(f"      [GEOMETRY] 📐 GRIND ITC: SL {data['sl_points']} | TGT {data['target_points']} (Tight)")
+                
+                # B. ORE (Early Only)
+                elif sel_style == 'OPENING_RANGE_EXPANSION':
+                    # Only < 10:00
+                    hr_int = int(current_time_str.split(':')[0]) if current_time_str != 'N/A' else 9
+                    if hr_int >= 10:
+                        logger.warning(f"      [ENGINE] 🛑 GRIND BLOCK: ORE blocked after 10:00.")
+                        data['action'] = "HOLD"
+                        data['engine_decision'] = "BLOCKED"
+                
+                # C. REMR (Strict Block)
+                elif sel_style in ['REMR', 'RANGE_EXTREME_MEAN_REVERSION']:
+                    # Allowed ONLY if Exhaustion + Extreme
+                    is_exhausted = micro_context.get('bearish_exhaustion', False) # for PUT
+                    # For CALL? Bullish exhaustion not yet implemented fully, assuming mostly PUTs in Grind Up.
+                    # General rule:
+                    loc = location_context.get('location', 'MID')
+                    is_extreme = loc in ['NEAR_RESISTANCE', 'OPTIMAL_TOP', 'NEAR_SUPPORT', 'OPTIMAL_BOTTOM']
+                    
+                    if not (is_exhausted and is_extreme):
+                        logger.warning(f"      [ENGINE] 🛑 GRIND BLOCK: REMR blocked (Trend is Grinding).")
+                        data['action'] = "HOLD"
+                        data['engine_decision'] = "BLOCKED"
+                        data['reason'] = "REMR Blocked in TREND_GRIND (Counter-trend trap)"
+
+                # D. VBD (Block)
+                elif sel_style == "VOLATILITY_BREAK_DISCOVERY":
+                     logger.warning(f"      [ENGINE] 🛑 GRIND BLOCK: VBD blocked in Grind.")
+                     data['action'] = "HOLD"
+                     data['engine_decision'] = "BLOCKED"
+            
+            # 4. REMR PUT Gate (Bearish Exhaustion) - General
+            if sel_style == "REMR" and action == "BUY_PUT" and active_regime != 'TREND_GRIND':
+                # Require Exhaustion for fading UP moves
+                is_exhausted = micro_context.get('bearish_exhaustion', False)
+                loc = location_context.get('location', 'MID')
+                if not is_exhausted and loc not in ['NEAR_RESISTANCE', 'OPTIMAL_TOP']:
+                    # If not at hard resistance, we MUST have exhaustion signature
+                    logger.warning(f"      [ENGINE] 🛑 REMR PUT BLOCKED: No Bearish Exhaustion signature and not at Hard Level.")
+                    data['action'] = "HOLD" 
+                    data['reason'] = "REMR Put Blocked: Missing Bearish Exhaustion Signature."
+                    data['engine_decision'] = "BLOCKED"
             
             # --- CALCULATION (EXISTING LOGIC) ---
             
@@ -931,50 +1360,183 @@ class LLMClient:
                      data['reason'] = "Flip Intelligence: Bias flip blocked (no rejection pattern confirmed)."
                      data['engine_decision'] = "BLOCKED"
 
-            # 4. TWO-STAGE TREND CONFIRMATION (Replaces impulsive overrides)
-            # Stage 1: Break Detected (already done above)
-            # Stage 2: Acceptance Confirmed (pullback failed to retrace >40% OR 2 closes beyond break)
+            # 4. SYMMETRIC TREND ACCEPTANCE & DIRECTIONAL SYMMETRY (Phase-2.6)
+            # LOGIC: Trend = Magnitude (Strength). Direction = Sign.
+            # We decouple them to ensure Bearish trends are treated identically to Bullish ones.
             
             trend_acceptance_confirmed = False
             failure_to_accept = micro_context.get('failure_to_accept', False)
-            impulse_detected = micro_context.get('impulse_detected', False)
             retracement_depth = micro_context.get('retracement_depth', 'UNCERTAIN')
-            vol_behavior = micro_context.get('volume_behavior', 'NORMAL')
-            is_expanding_vol = 'EXPANDING' in vol_behavior
+            
+            # --- DIRECTIONAL PRIMITIVES ---
+            np_val = micro_context.get('net_progress_3', 0.0)
+            m_slope = micro_context.get('momentum_slope', 0.0)
+            
+            dir_strength = abs(np_val)
+            np_sign = 1 if np_val > 0 else -1
+            mom_sign = 1 if m_slope > 0.02 else (-1 if m_slope < -0.02 else 0)
+            
+            # Composite Direction: NetProgress (Day) vs Momentum (Intraday)
+            # If they conflict, we are in a 'Trap/Reversal' zone -> Neutral
+            if mom_sign != 0 and mom_sign != np_sign:
+                 dir_sign = 0
+                 logger.debug(f"      [DIR] ⚠️ Conflict: Day={np_sign}, Mom={mom_sign} -> Neutralized")
+            else:
+                 dir_sign = np_sign
+            
+            # Directional Alignment Check w/ Reversal Permission
+            action_aligned = False
+            
+            if dir_sign == 1:
+                 if data['action'] == 'BUY_CALL': action_aligned = True
+            elif dir_sign == -1:
+                 if data['action'] == 'BUY_PUT': action_aligned = True
+            elif dir_sign == 0:
+                 # In Neutral/Conflict, we trust short-term momentum
+                 if data['action'] == 'BUY_CALL' and mom_sign == 1:
+                      action_aligned = True
+                      logger.info(f"      [DIR] ⚡ Allowed BUY_CALL in Neutral Zone (Momentum Support)")
+                 elif data['action'] == 'BUY_PUT' and mom_sign == -1:
+                      action_aligned = True
+                      logger.info(f"      [DIR] ⚡ Allowed BUY_PUT in Neutral Zone (Momentum Support)")
+            
+            # --- ELASTIC REGIME ENFORCEMENT (Phase-2.6) ---
+            # Instead of binary BLOCK, we modulate size/geometry based on Regime Quality.
+            
+            regime_quality = 'HIGH'
+            modulate_geometry = False
+            mod_sl_mult = 1.0
+            mod_tgt_mult = 2.0 # Default
+            
+            if active_regime == 'TRANSITION':
+                # Allow ITC but conservative TGT
+                regime_quality = 'MEDIUM'
+                modulate_geometry = True
+                mod_tgt_mult = 1.0 # Cap TGT at 1ATR
+                logger.debug(f"      [ELASTIC] ⚠️ Regime TRANSITION: Capping Target to 1.0*ATR")
+                
+            elif active_regime == 'ROTATION':
+                # Allow ITC only if TER > 0.2 (High Quality for Rotation) AND Strong Direction
+                if ter > 0.20 and dir_strength > 0.3 * eff_atr:
+                    regime_quality = 'MEDIUM'
+                    modulate_geometry = True
+                    mod_sl_mult = 0.5 # Tight SL
+                    mod_tgt_mult = 1.2
+                    logger.debug(f"      [ELASTIC] ⚠️ Regime ROTATION: Allowing ITC with Tight SL (TER {ter:.2f} OK)")
+                else:
+                    regime_quality = 'LOW'
+                    # We don't block yet, we just set quality low, effectively reducing conf expectation later?
+                    # Or valid to block explicit ITC in low quality rotation.
+                    sel_style = data.get('selected_style', '')
+                    if sel_style in ['ITC', 'INTRADAY_TREND_CONTINUATION']:
+                        logger.warning(f"      [ELASTIC] 🛑 ROTATION BLOCK: TER {ter:.2f} too low for meaningful trend.")
+                        data['action'] = "HOLD"
+                        data['engine_decision'] = "BLOCKED"
+                        
+            elif active_regime == 'TREND_GRIND':
+                 # Already handled in block above, but ensuring Direction Awareness
+                 regime_quality = 'MEDIUM_HIGH'
+                 # Note: The block above sets data['manual_geometry'] for Grind. We keep that.
+            
+            # --- SYMMETRIC ACCEPTANCE GATES ---
             
             if structural_break and not failure_to_accept:
-                 # CRITICAL FIX: Trend Acceptance requires ENERGY, not just location
-                 # Impulse = directional commitment, ExpandVol = participation urgency
-                 # Pullback is a TIMING filter, not a confirmation signal
+                 impulse_detected = micro_context.get('impulse_detected', False)
+                 is_expanding_vol = 'EXPANDING' in micro_context.get('volume_behavior', 'NORMAL')
+                 is_grind = micro_context.get('is_grind', False)
                  
-                 has_energy = impulse_detected or is_expanding_vol
-                 acceptable_pullback = retracement_depth in ['SHALLOW', 'NORMAL', 'UNCERTAIN']
+                 # Break Logic (Is the break supported by momentum?)
+                 break_aligned_momentum = False
+                 if break_dir == 'BULLISH' and dir_sign == 1: break_aligned_momentum = True
+                 if break_dir == 'BEARISH' and dir_sign == -1: break_aligned_momentum = True
                  
-                 # SYNERGY TUNING: Restore strictness for reliability
+                 # Energy Gate: Impulse OR Expansion OR (Grind + Aligned)
+                 has_energy = (impulse_detected and break_aligned_momentum) or is_expanding_vol or (is_grind and break_aligned_momentum)
+                 
+                 # Dynamic Confidence Floor (Symmetric)
+                 # Lower bar for PROVEN grinds/impulses. Higher bar for generic signals.
                  if v_reversal:
                       high_conf_floor = 0.45 
-                 elif is_aligned:
+                 elif is_grind and break_aligned_momentum:
+                      high_conf_floor = 0.50
+                 elif break_aligned_momentum and has_energy:
                       high_conf_floor = 0.55
                  else:
-                      high_conf_floor = 0.70
-
-                 high_conf_aligned = data.get('confidence', 0) >= high_conf_floor
+                      high_conf_floor = 0.70 # Default high bar if no explicit energy
+                 
+                 high_conf_passed = data.get('confidence', 0) >= high_conf_floor
                  
                  if has_energy:
-                      # Energy detected - true acceptance
                       trend_acceptance_confirmed = True
-                      logger.warning(f"      [ENGINE] ✅ TREND ACCEPTANCE (ENERGY): Impulse={impulse_detected}, ExpandVol={is_expanding_vol}, Pullback={retracement_depth}")
-                 elif acceptable_pullback and high_conf_aligned:
-                      # Steady grind - accept if confidence crosses the (now lower) floor
+                      logger.warning(f"      [ENGINE] ✅ TREND ACCEPTANCE (ENERGY): Dir={break_dir}, Strength={dir_strength:.1f}, Impulse={impulse_detected}")
+                 elif acceptable_pullback and high_conf_passed and is_grind:
+                      # Grind Acceptance
                       trend_acceptance_confirmed = True
-                      logger.warning(f"      [ENGINE] ✅ TREND ACCEPTANCE (GRIND): Conf={data.get('confidence', 0):.2f}, Pullback={retracement_depth}, Aligned={is_aligned}")
-                 elif acceptable_pullback:
-                      # Pullback ok but NO energy or high confidence - this is drift, not commitment
-                      logger.warning(f"      [ENGINE] ⏳ PENDING ACCEPTANCE: Pullback={retracement_depth} but NO ENERGY (Need Energy or Conf >= {high_conf_floor})")
+                      logger.warning(f"      [ENGINE] ✅ TREND ACCEPTANCE (GRIND): Dir={break_dir}, Conf={data.get('confidence',0):.2f}, Aligned={break_aligned_momentum}")
+                 elif acceptable_pullback and high_conf_passed:
+                       # Standard high-conf drift
+                       trend_acceptance_confirmed = True
+                       logger.warning(f"      [ENGINE] ✅ TREND ACCEPTANCE (CONF): Dir={break_dir}, Conf={data.get('confidence',0):.2f}")
                  else:
-                      logger.warning(f"      [ENGINE] ⏳ BREAK PENDING ACCEPTANCE: Retracement={retracement_depth}, Impulse={impulse_detected}, ExpandVol={is_expanding_vol}")
+                       logger.warning(f"      [ENGINE] ⏳ PENDING ACCEPTANCE: Dir={break_dir}, Pullback={retracement_depth}, Energy={has_energy}, Conf={data.get('confidence',0):.2f}")
 
-            # --- FINAL GATE: MOMENTUM ALIGNMENT ---
+            # --- METRIC AUTHORITY (Phase-2.6) ---
+            # Objective Edge > Model Hesitation.
+            # We calculate a raw technical score to override LLM confidence if the setup is perfect.
+            
+            objective_score = 0
+            
+            # 1. Trend Quality
+            if ter > 0.7: objective_score += 30
+            elif ter > 0.5: objective_score += 15
+            
+            # 2. Energy & Alignment
+            # Recalculate aligned momentum for current action (not just break dir)
+            # We already have action_aligned computed earlier
+            if action_aligned and has_energy: objective_score += 30
+            elif action_aligned: objective_score += 10
+            
+            # 3. Structure
+            if structural_break and trend_acceptance_confirmed: objective_score += 20
+            
+            # 4. Behavioral
+            if rejection_pattern != 'NONE' and sel_style in ['REMR', 'RANGE_EXTREME_MEAN_REVERSION']: objective_score += 20
+            
+            # Authority Override
+            current_conf = data.get('confidence', 0.5)
+            
+            if objective_score >= 75:
+                 # High Quality Setup -> Force minimum confidence
+                 if current_conf < 0.80:
+                      logger.warning(f"      [AUTHORITY] ⚖️  Metric Override: Boosting Conf {current_conf:.2f} -> 0.80 (Score: {objective_score})")
+                      data['confidence'] = 0.80
+            elif objective_score <= 20:
+                 # Low Quality Setup -> Cap confidence
+                 if current_conf > 0.40:
+                      logger.warning(f"      [AUTHORITY] ⚖️  Metric Override: Capping Conf {current_conf:.2f} -> 0.40 (Score: {objective_score})")
+                      data['confidence'] = 0.40
+
+            # 5. REGIME DIRECTION AUTHORITY (Phase-2.5)
+            # Lock Direction to Regime Direction. No counter-trading trend unless explicitly marked.
+            
+            if active_regime in ['IMPULSE_TREND', 'TREND_GRIND']:
+                regime_dir = micro_context.get('break_direction', 'NEUTRAL') # Or derive from active_regime context?
+                # Actually, structural_break_state is authoritative for direction
+                
+                auth_dir = self.structural_break_state
+                if auth_dir:
+                    if auth_dir == 'BULLISH' and action == 'BUY_PUT' and not v_reversal:
+                        logger.warning(f"      [ENGINE] 🛑 REGIME AUTHORITY: BUY_PUT Blocked in BULLISH {active_regime}")
+                        data['action'] = 'HOLD'
+                        data['reason'] = f"Regime Authority: Cannot Short in Bullish {active_regime}"
+                        data['engine_decision'] = "BLOCKED"
+                    elif auth_dir == 'BEARISH' and action == 'BUY_CALL' and not v_reversal:
+                        logger.warning(f"      [ENGINE] 🛑 REGIME AUTHORITY: BUY_CALL Blocked in BEARISH {active_regime}")
+                        data['action'] = 'HOLD'
+                        data['reason'] = f"Regime Authority: Cannot Long in Bearish {active_regime}"
+                        data['engine_decision'] = "BLOCKED"
+            
+            # --- FINAL GATE: MOMENTUM ALIGNMENT (SYMMETRIC) ---
             # Section 3.D/Synergy fix: Even if structure is accepted, block if momentum is sharks-opposite
             # This prevents entering a gap-up that is actively dropping (01-12 scenario)
             m_slope = micro_context.get('momentum_slope', 0)

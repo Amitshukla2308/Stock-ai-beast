@@ -1,13 +1,19 @@
 # engine/enrichment.py
 import math
+from datetime import datetime, time
 
 # Style-Specific Economic Minimums (Authoritative - Canonical Spec)
 STYLE_ECONOMICS = {
-    "OPENING_RANGE_EXPANSION": {"min_pnl": 1000, "max_hold_min": 45},
-    "RANGE_EXTREME_MEAN_REVERSION": {"min_pnl": 500, "max_hold_min": 20},
-    "INTRADAY_TREND_CONTINUATION": {"min_pnl": 1500, "max_hold_min": 60},
-    "VOLATILITY_BREAK": {"min_pnl": 1800, "max_hold_min": 30},
-    "LATE_SESSION_RISK_OFF": {"min_pnl": float("inf"), "max_hold_min": 0}
+    "OPENING_RANGE_EXPANSION": {"min_pnl": 1000, "max_hold_min": 105},
+    "RANGE_EXTREME_MEAN_REVERSION": {"min_pnl": 500, "max_hold_min": 80},
+    "INTRADAY_TREND_CONTINUATION": {"min_pnl": 1500, "max_hold_min": 120},
+    "VOLATILITY_BREAK": {"min_pnl": 1800, "max_hold_min": 90},
+    "LATE_SESSION_RISK_OFF": {"min_pnl": float("inf"), "max_hold_min": 0},
+    # Short Codes Support
+    "ORE": {"min_pnl": 1000, "max_hold_min": 105},
+    "REMR": {"min_pnl": 500, "max_hold_min": 80},
+    "ITC": {"min_pnl": 1500, "max_hold_min": 120},
+    "VBD": {"min_pnl": 1800, "max_hold_min": 90}, 
 }
 
 # ============================================================================
@@ -27,12 +33,25 @@ def calculate_time_context(current_time_str):
     try:
         # Parse HH:MM
         hour, minute = map(int, current_time_str.split(':'))
+        current_time = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+        today_date = current_time.date()
         
-        # Calculate minutes since 09:15
-        market_open_minutes = 9 * 60 + 15  # 555
-        current_minutes = hour * 60 + minute
-        minutes_since_open = current_minutes - market_open_minutes
+        from datetime import time # Ensure time is imported or available. existing import?
+        # Assuming table top imports are present.
         
+        # Find market open (09:15)
+        market_open = datetime.combine(today_date, time(9, 15))
+        
+        if current_time.tzinfo:
+            # naive/aware fix if needed
+            market_open = market_open.replace(tzinfo=current_time.tzinfo)
+            
+        minutes_since_open = (current_time - market_open).total_seconds() / 60
+        
+        # 1. Bias Decay (Phase 2 Fix)
+        # Weight decays from 1.0 to 0.0 over 60 minutes
+        bias_weight = max(0.0, 1.0 - (minutes_since_open / 60.0))
+        if minutes_since_open > 60: bias_weight = 0.0      
         # Classify session phase per canonical spec
         if minutes_since_open <= 45:
             session_phase = "OPENING"
@@ -42,14 +61,221 @@ def calculate_time_context(current_time_str):
             session_phase = "LATE"
         
         return {
-            "minutes_since_open": minutes_since_open,
-            "session_phase": session_phase
+            "minutes_since_open": int(minutes_since_open),
+            "session_phase": session_phase,
+            "bias_weight": round(bias_weight, 2),
+            "next_event": "CLOSE" if session_phase == "CLOSING" else "NONE"
         }
     except:
         return {
             "minutes_since_open": 0,
-            "session_phase": "UNKNOWN"
+            "session_phase": "UNKNOWN",
+            "bias_weight": 1.0
         }
+
+# ============================================================================
+# CANONICAL SECTION 2: REGIME & MOMENTUM
+# ============================================================================
+def detect_rejection_pattern(bar, prev_bars=None):
+    """
+    Behavioral Rejection Signature (Canonical Phase-2.5)
+    Requires: Wick > Body AND Close in extreme 30% AND Relative Volume expansion
+    """
+    h, l, o, c = bar['h'], bar['l'], bar['o'], bar['c']
+    range_pts = h - l
+    if range_pts <= 0: return "NONE"
+    
+    body = abs(c - o)
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    
+    # 1. Volume Expansion Check
+    rel_vol = 1.0
+    if prev_bars and len(prev_bars) >= 5:
+        avg_vol = sum(b['volume'] for b in prev_bars[-5:]) / 5
+        rel_vol = bar['volume'] / avg_vol if avg_vol > 0 else 1.0
+    
+    # 2. Rejection Logic (Short/Top Rejection)
+    # Wick Ratio > 0.6 (Stricter Phase-2.5)
+    wick_ratio_top = upper_wick / range_pts if range_pts > 0 else 0
+    is_top_rejection = (wick_ratio_top > 0.6) and (c <= l + 0.4 * range_pts) and (rel_vol >= 1.0)
+    
+    # 3. Rejection Logic (Long/Bottom Rejection)
+    wick_ratio_bottom = lower_wick / range_pts if range_pts > 0 else 0
+    is_bottom_rejection = (wick_ratio_bottom > 0.6) and (c >= h - 0.4 * range_pts) and (rel_vol >= 1.0)
+    
+    if is_top_rejection: return "TOP_REJECTION"
+    if is_bottom_rejection: return "BOTTOM_REJECTION"
+    return "NONE"
+
+def calculate_momentum_slope(bars_3):
+    """
+    Directional energy over last 3 bars.
+    Returns slope (pts/bar) + consistency.
+    """
+    if len(bars_3) < 3: return 0.0, 0.0
+    
+    # Simple linear regression slope of Closes
+    y = [b['c'] for b in bars_3]
+    x = [0, 1, 2]
+    # m = (n*sum(xy) - sum(x)sum(y)) / (n*sum(x^2) - (sum(x))^2)
+    n = len(x)
+    sum_x = sum(x)
+    sum_y = sum(y)
+    sum_xx = sum(i*i for i in x)
+    sum_xy = sum(x[i]*y[i] for i in range(n))
+    
+    denom = (n * sum_xx - sum_x**2)
+    slope = (n * sum_xy - sum_x * sum_y) / denom if denom != 0 else 0.0
+    
+    # Consistency: all 3 bars in same direction?
+    consistency = 1.0 if (y[2] > y[1] > y[0]) or (y[2] < y[1] < y[0]) else 0.5
+    
+    return round(slope, 2), consistency
+
+def calculate_or_regime(bars_5min, or_range):
+    """
+    Classifies the Opening Auction into DISCOVERY, BALANCE, or FAILURE.
+    """
+    if not bars_5min or len(bars_5min) < 3: return "UNKNOWN"
+    
+    overlap_count = 0
+    net_move = abs(bars_5min[-1]['c'] - bars_5min[0]['o'])
+    
+    for i in range(1, len(bars_5min)):
+        b_curr = bars_5min[i]
+        b_prev = bars_5min[i-1]
+        
+        # Range Overlap
+        overlap = min(b_curr['h'], b_prev['h']) - max(b_curr['l'], b_prev['l'])
+        if overlap > 0:
+            overlap_count += 1
+
+    overlap_ratio = overlap_count / len(bars_5min)
+    
+    # Thresholds
+    # SYNERGY TUNING: If trending with conviction (>40% of OR range), it's DISCOVERY
+    # even if overlap is high (e.g. steady grind without deep pullbacks)
+    move_ratio = net_move / or_range if or_range > 0 else 0
+    if move_ratio > 0.4:
+        return "DISCOVERY"
+
+    if overlap_ratio > 0.7 and net_move < 0.3 * or_range: return "BALANCE"
+    
+    return "DISCOVERY" # Default to discovery for active handling
+
+def detect_v_reversal(bars_15min, current_price, em_low, em_high, atr):
+    """
+    Detects a V-reversal pattern (Sharp turn from extreme stretch).
+    Matches 01-12 behavior.
+    """
+    if not bars_15min or len(bars_15min) < 3:
+        return False
+        
+    last_3 = bars_15min[-3:]
+    
+    # 1. Extreme Stretch Check
+    # Price should be near or below EM Low
+    is_extreme = current_price < em_low + 0.3 * atr
+    
+    # 2. Rejection Behavior
+    # Handled by caller or specialized function
+    return is_extreme
+
+def calculate_trend_efficiency(bars_5min, window=5):
+    """
+    Calculates Trend Efficiency Ratio (TER) to classify regime.
+    TER = NetDisplacement / SumRanges
+    
+    Returns: (ter_value, regime)
+    """
+    if not bars_5min or len(bars_5min) < window:
+        return 0.0, "ROTATION"
+        
+    recent_bars = bars_5min[-window:]
+    
+    # Net Displacement: Close[N] - Open[1]
+    net_displacement = recent_bars[-1]['c'] - recent_bars[0]['o']
+    
+    # Sum of Ranges: Sum(High - Low)
+    sum_ranges = sum((b['h'] - b['l']) for b in recent_bars)
+    
+    # Safety: Avoid division by zero
+    ter = abs(net_displacement) / max(sum_ranges, 1e-6)
+    ter = round(ter, 2)
+    
+    regime = "TRANSITION"
+    if ter > 0.55: regime = "TREND"
+    elif ter < 0.30: regime = "ROTATION"
+    
+    return ter, regime
+
+def calculate_effective_atr(bars_5min, current_atr, direction="NEUTRAL", window=20):
+    """
+    Calculates Directional Effective ATR.
+    Uses rolling median of Bullish/Bearish candle ranges.
+    Fallback to Global ATR if insufficient data.
+    """
+    if not bars_5min or len(bars_5min) < 10:
+        return current_atr
+        
+    recent = bars_5min[-window:] if len(bars_5min) > window else bars_5min
+    
+    bull_ranges = []
+    bear_ranges = []
+    
+    for b in recent:
+        r = b['h'] - b['l']
+        if b['c'] > b['o']: bull_ranges.append(r)
+        elif b['c'] < b['o']: bear_ranges.append(r)
+        
+    import statistics
+    
+    eff_atr = current_atr
+    
+    if direction == "BULLISH" and len(bull_ranges) >= 3:
+        eff_atr = statistics.median(bull_ranges)
+    elif direction == "BEARISH" and len(bear_ranges) >= 3:
+        eff_atr = statistics.median(bear_ranges)
+        
+    # Safety clamp: Don't deviate wildly from global ATR (0.5x to 2.0x)
+    eff_atr = max(current_atr * 0.5, min(eff_atr, current_atr * 2.0))
+    
+    return round(eff_atr, 1)
+
+def detect_bearish_exhaustion(last_bar, avg_range, rel_vol):
+    """
+    Detects Bearish Exhaustion Candle.
+    Criteria: Upper Wick > 0.6 * Range, Close in bottom half, High Vol, Wide Range.
+    """
+    if not last_bar: return False
+    
+    b_range = last_bar['h'] - last_bar['l']
+    if b_range == 0: return False
+    
+    upper_wick = last_bar['h'] - max(last_bar['c'], last_bar['o'])
+    upper_ratio = upper_wick / b_range
+    mid_point = (last_bar['h'] + last_bar['l']) / 2
+    
+    is_exhaustion = (
+        upper_ratio > 0.6 and
+        last_bar['c'] < mid_point and
+        rel_vol > 1.3 and
+        b_range > 1.2 * avg_range
+    )
+    
+    return is_exhaustion
+    # Last few bars should show long wicks or a hammer at the low
+    rejection = detect_rejection_pattern(last_3[-1]) == "BOTTOM_REJECTION"
+    
+    # 3. Fast Recovery
+    # Current bar close > previous bar body high
+    recovery = last_3[-1]['c'] > last_3[-2]['h']
+    
+    if is_extreme and rejection and recovery:
+        return True
+        
+    return False
 
 # ============================================================================
 # CANONICAL SECTION 3: HTF LOCATION CONTEXT
@@ -110,14 +336,76 @@ def calculate_location_context(current_price, support, pivot, resistance, or_ran
     }
 
 
-def calculate_micro_context(bars_15min, current_price, support, resistance, pivot, atr_14, or_range=0):
+def calculate_vwap(bars):
+    """
+    Calculates VWAP from a list of bars (e.g. today_5min).
+    VWAP = Sum(Volume * Typical Price) / Sum(Volume)
+    """
+    if not bars: return 0.0
+    
+    cum_pv = 0.0
+    cum_vol = 0.0
+    
+    for b in bars:
+        typ = (b['h'] + b['l'] + b['c']) / 3
+        vol = b['volume']
+        cum_pv += typ * vol
+        cum_vol += vol
+        
+    return round(cum_pv / cum_vol, 2) if cum_vol > 0 else 0.0
+
+def detect_two_bar_failure(bars):
+    """
+    Detects Two-Bar Reversal (Failure to maintain new extreme).
+    """
+    if not bars or len(bars) < 2: return False
+    
+    b1 = bars[-2]
+    b2 = bars[-1]
+    
+    # Bullish Reversal (Red then Green)
+    # B1 Red, B2 Green, B2 Low < B1 Low, B2 Close > B1 Close
+    is_bullish_fail = (
+        b1['c'] < b1['o'] and
+        b2['l'] < b1['l'] and
+        b2['c'] > b1['c']
+    )
+    
+    # Bearish Reversal (Green then Red)
+    # B1 Green, B2 Red, B2 High > B1 High, B2 Close < B1 Close
+    is_bearish_fail = (
+        b1['c'] > b1['o'] and
+        b2['h'] > b1['h'] and
+        b2['c'] < b1['c']
+    )
+    
+    return is_bullish_fail or is_bearish_fail
+
+def calculate_micro_context(bars_15min, current_price, support, resistance, pivot, atr_14, or_range=0, em_low=0, em_high=0, today_5min=None):
     """
     Analyzes 15-min bars to determine micro-structural context using deterministic mapping.
     - bars_15min: List of dicts with o, h, l, c, volume
     - atr_14: ATR value from 15-min bars
+    - today_5min: 5-min bars for TER calculation (Phase-2 Geometry)
     """
-    if not bars_15min or len(bars_15min) < 2:
-        return {}
+    if not bars_15min or len(bars_15min) < 3:
+        return {
+            "behavior": "UNKNOWN",
+            "micro_bias": "NEUTRAL",
+            "rejection": False,
+            "rejection_pattern": "NONE",
+            "momentum_slope": 0.0,
+            "momentum_consistency": 0.0,
+            "has_energy": False,
+            "v_reversal": False,
+            "trend_efficiency": 0.0,
+            "trend_regime": "ROTATION",
+            "effective_atr": atr_14,
+            "bearish_exhaustion": False,
+            "is_grind": False,
+            "vwap_rejection": False,
+            "two_bar_failure": False
+        }
 
     closes = [b['c'] for b in bars_15min]
     
@@ -182,6 +470,89 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
     weak_follow_through = False
     rejection = False
     
+    # New Metrics for Smart Flip
+    last_body_ratio = 0.0
+    velocity_increasing = False
+    absorption = False
+    net_progress_3 = 0.0
+    
+    last_bar = bars_15min[-1]
+    last_range = last_bar['h'] - last_bar['l']
+    last_body = abs(last_bar['c'] - last_bar['o'])
+    if last_range > 0:
+        last_body_ratio = round(last_body / last_range, 2)
+    
+    # Calculate Velocity (Range expansion in direction)
+    if len(bars_15min) >= 3:
+        range_now = bars_15min[-1]['h'] - bars_15min[-1]['l']
+        range_prev = bars_15min[-2]['h'] - bars_15min[-2]['l']
+        velocity_increasing = range_now > range_prev * 1.2
+        
+        # Net Progress (Close to Close of last 3 bars)
+        net_progress_3 = bars_15min[-1]['c'] - bars_15min[-3]['c']
+
+        # Absorption (High Volume + Low Progress)
+        vol_avg = sum(b['volume'] for b in bars_15min[-4:-1]) / 3
+        curr_vol = bars_15min[-1]['volume']
+        if curr_vol > 1.5 * vol_avg and abs(net_progress_3) < 0.2 * or_range:
+             absorption = True
+
+    # 2. Structural Break Detector (Trend Override)
+    # 2. Structural Break Detector (Trend Override)
+    # Check for VALID break in last 6 bars (1.5 hours) - Persistent State
+    structural_break = False
+    break_direction = "NEUTRAL"
+    
+    # Analyze rolling 3-bar windows in last 6 bars
+    # Need at least 3 bars
+    if len(bars_15min) >= 3:
+        # Scan windows: [..., -3], [..., -2], [..., -1]
+        # Start looking from -6 (or len) up to -1
+        lookback = min(len(bars_15min), 8) # Search last 2 hours max
+        
+        # Valid break candidate
+        detected_break = None # (type, index, break_price)
+        
+        for i in range(len(bars_15min) - lookback + 2, len(bars_15min)):
+            # Window ending at i (bars[i-2], bars[i-1], bars[i])
+            window = [bars_15min[i-2], bars_15min[i-1], bars_15min[i]]
+            
+            # Check for Up Break
+            is_up = all(b['c'] > b['o'] for b in window) and \
+                    all(window[k]['c'] > window[k-1]['c'] for k in range(1, 3))
+            
+            # Check for Down Break
+            is_down = all(b['c'] < b['o'] for b in window) and \
+                      all(window[k]['c'] < window[k-1]['c'] for k in range(1, 3))
+            
+            # Check for Net Progress
+            vol_proxy = or_range if or_range > 0 else 100.0
+            move = window[2]['c'] - bars_15min[i-2]['open'] if 'open' in bars_15min[i-2] else window[2]['c'] - bars_15min[i-2]['o']
+            
+            if is_up or (move > 1.2 * vol_proxy):
+                 detected_break = ('BULLISH', i, window[2]['c'])
+            elif is_down or (move < -1.2 * vol_proxy):
+                 detected_break = ('BEARISH', i, window[2]['c'])
+                 
+        # If break detected, check INVALIDATION (Reversal)
+        if detected_break:
+            b_type, b_idx, b_price = detected_break
+            
+            # Check price action AFTER the break
+            # If current price reversed > 50% of break move? Or just strictly above/below breakdown?
+            curr_price = bars_15min[-1]['c']
+            
+            if b_type == 'BEARISH':
+                # Valid if price is NOT significantly above break price + buffer
+                # Allow retest, but if it closes above break start... 
+                # Simple Logic: If it's a Break, we are in Trend Mode unless we see a Structural Reversal (3 bars up).
+                # Since we loop chronologically, a later Bullish break would overwrite detection.
+                structural_break = True
+                break_direction = 'BEARISH'
+            elif b_type == 'BULLISH':
+                structural_break = True
+                break_direction = 'BULLISH'
+
     if or_range > 0:
         radius = 0.12 * or_range
         # A. Detect Stall at Support/Resistance
@@ -212,12 +583,12 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
         result = abs(bars_15min[-1]['c'] - bars_15min[-3]['c'])
         weak_follow_through = (effort >= 0.6 * or_range and result <= 0.2 * or_range)
 
-        # D. Rejection (Canonical Logic)
-        c_now = bars_15min[-1]['c']
-        c_prev = bars_15min[-2]['c']
-        rejection = (c_now < support and c_prev > support) or (c_now > resistance and c_prev < resistance) or \
-                    (last_3[0]['l'] < support and last_3[-1]['c'] > support) or \
-                    (last_3[0]['h'] > resistance and last_3[-1]['c'] < resistance)
+        # Phase 2.5: Behavioral Rejection Pattern
+        rej_pattern = detect_rejection_pattern(bars_15min[-1], bars_15min[:-1])
+        rejection = rej_pattern != "NONE"
+        
+        # E. Momentum Slope
+        m_slope, m_consistency = calculate_momentum_slope(bars_15min[-3:])
 
     # 4. Consolidate Price Behavior
     if stall_at_level:
@@ -225,12 +596,9 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
     elif failure_to_extend:
         price_behavior = "FAILURE_TO_EXTEND"
     elif rejection:
-        price_behavior = "REJECTION"
+        price_behavior = f"REJECTION_{rej_pattern}"
     else:
         # Fallback to breakout or range
-        last_bar = bars_15min[-1]
-        last_body = abs(last_bar['c'] - last_bar['o'])
-        last_range = last_bar['h'] - last_bar['l']
         is_breakout = (last_range > 0 and (last_body / last_range) > 0.6)
         if is_breakout:
             price_behavior = "BREAKOUT"
@@ -252,14 +620,14 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
     # 5. Micro Bias
     micro_bias = "NEUTRAL"
     if swing_context == "BEARISH_SWING":
-        if price_behavior in ["CONSOLIDATION_AT_SUPPORT", "REJECTION_AT_RESISTANCE"] and "RED" in volume_behavior:
+        if price_behavior in ["CONSOLIDATION_AT_SUPPORT", "REJECTION_TOP_REJECTION"] and "RED" in volume_behavior:
             micro_bias = "BEARISH_CONTINUATION"
-        elif price_behavior == "REJECTION_AT_SUPPORT" and volume_behavior == "CONTRACTING":
+        elif price_behavior == "REJECTION_BOTTOM_REJECTION" and volume_behavior == "CONTRACTING":
             micro_bias = "BEARISH_EXHAUSTION"
     elif swing_context == "BULLISH_SWING":
-        if price_behavior in ["CONSOLIDATION_AT_RESISTANCE", "REJECTION_AT_SUPPORT"] and "GREEN" in volume_behavior:
+        if price_behavior in ["CONSOLIDATION_AT_RESISTANCE", "REJECTION_BOTTOM_REJECTION"] and "GREEN" in volume_behavior:
             micro_bias = "BULLISH_CONTINUATION"
-        elif price_behavior == "REJECTION_AT_RESISTANCE" and volume_behavior == "CONTRACTING":
+        elif price_behavior == "REJECTION_TOP_REJECTION" and volume_behavior == "CONTRACTING":
             micro_bias = "BULLISH_EXHAUSTION"
 
     # 6. FAILURE_TO_ACCEPT (ITC Veto - Canonical)
@@ -306,6 +674,8 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
     # 3. Entry location quality (not MID_RANGE / IN_RANGE)
     # 4. Strength (Swing Context established)
     
+    today_5min = today_5min or []
+    
     total_cond = 4
     satisfied = 0
     if micro_bias != "NEUTRAL": satisfied += 1
@@ -314,6 +684,57 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
     if swing_context != "RANGE_SWING": satisfied += 1
     
     confidence = round(satisfied / total_cond, 2)
+
+    today_5min = today_5min or []
+    total_cond = 4
+
+    # 7. Phase-2 Geometry Extensions
+    ter, trend_regime = calculate_trend_efficiency(today_5min)
+
+    # 7b. TREND_GRIND Detection
+    # Logic: TrendEfficiency > 0.35 AND NetProgress > 0.6*ATR AND No Impulse/Expansion
+    effective_atr = calculate_effective_atr(today_5min, atr_14, direction="NEUTRAL") # Default until direction
+    
+    is_grind = False
+    if ter > 0.35:
+        net_prog_abs = abs(net_progress_3)
+        # Using effective_atr for threshold
+        if net_prog_abs >= 0.6 * effective_atr:
+            # Must NOT be Impulse or Expanding Vol (Slow Grind)
+            if not impulse_detected and "EXPANDING" not in volume_behavior and retracement_depth != "DEEP":
+                is_grind = True
+                trend_regime = "TREND_GRIND"
+    
+    # Calculate Direction for Effective ATR (Refined)
+    eff_direction = "NEUTRAL"
+    if micro_bias == "BULLISH_CONTINUATION": eff_direction = "BULLISH"
+    elif micro_bias == "BEARISH_CONTINUATION": eff_direction = "BEARISH"
+    
+    # Recalculate Eff ATR if direction known
+    effective_atr = calculate_effective_atr(today_5min or bars_15min, atr_14, direction=eff_direction)
+    
+    # Bearish Exhaustion (for REMR)
+    bearish_exhaustion = detect_bearish_exhaustion(
+        last_bar=bars_15min[-1],
+        avg_range=(atr_14 / 2), # Approx avg range
+        rel_vol=bars_15min[-1]['volume'] / (sum(b['volume'] for b in bars_15min[-10:]) / 10 if len(bars_15min) >= 10 else 1)
+    )
+
+    # New REMR Validators
+    vwap_val = calculate_vwap(today_5min)
+    vwap_rejection = False
+    if vwap_val > 0:
+        # Close rejects VWAP? (Price approached VWAP and rejected)
+        # Simplify: Close is away from VWAP? No, Rejection means touched and retreated.
+        # Strict PROMPT definiton: "CloseRejectsVWAP == True"
+        # We assume this means price action shows rejection at VWAP level.
+        # Implementation: Wick touches VWAP, Close is away.
+        last = bars_15min[-1]
+        dist_vwap = abs(last['c'] - vwap_val)
+        touched = (last['l'] <= vwap_val <= last['h'])
+        vwap_rejection = touched and (dist_vwap > 0.1 * (last['h'] - last['l']))
+
+    two_bar_fail = detect_two_bar_failure(bars_15min)
 
     return {
         "swing_context": swing_context,
@@ -326,10 +747,31 @@ def calculate_micro_context(bars_15min, current_price, support, resistance, pivo
         "failure_to_extend": failure_to_extend,
         "weak_follow_through": weak_follow_through,
         "rejection": rejection,
+        "rejection_pattern": rej_pattern if 'rej_pattern' in locals() else "NONE",
         "failure_to_accept": failure_to_accept,
         "impulse_detected": impulse_detected,
-        "impulse_move_pts": round(i_move, 2) if impulse_detected else 0.0
+        "impulse_move_pts": round(i_move, 2) if impulse_detected else 0.0,
+        "last_body_ratio": last_body_ratio if 'last_body_ratio' in locals() else 0.0,
+        "velocity_increasing": velocity_increasing if 'velocity_increasing' in locals() else False,
+        "max_move_3": round(max_move_3, 1) if 'max_move_3' in locals() else 0.0,
+        "absorption": absorption if 'absorption' in locals() else False,
+        "net_progress_3": round(net_progress_3, 1) if 'net_progress_3' in locals() else 0.0,
+        "structural_break": structural_break,
+        "break_direction": break_direction,
+        "momentum_slope": m_slope if 'm_slope' in locals() else 0.0,
+        "momentum_consistency": m_consistency if 'm_consistency' in locals() else 0.0,
+        "has_energy": impulse_detected or ("EXPANDING" in volume_behavior),
+        "v_reversal": detect_v_reversal(bars_15min, current_price, em_low, em_high, atr_14),
+        "trend_efficiency": ter,
+        "trend_regime": trend_regime,
+        "effective_atr": effective_atr,
+        "bearish_exhaustion": bearish_exhaustion,
+        "is_grind": is_grind,
+        "vwap_rejection": vwap_rejection,
+        "two_bar_failure": two_bar_fail,
+        "vwap": vwap_val
     }
+
 
 def calculate_opening_range(today_5min):
     """
@@ -428,7 +870,7 @@ def calculate_economic_context(current_price, target_pts, selected_style=None):
         "min_required_pnl": min_required_pnl
     }
 
-def calculate_style_eligibility(current_time_str, micro_context, morning_plan, or_data, current_price, expected_move):
+def calculate_style_eligibility(current_time_str, micro_context, morning_plan, or_data, current_price, expected_move, today_5min=[], intraday_state="UNKNOWN"):
     """
     Determines exactly which trading styles are eligible based on time and structural facts.
     AUTHORITATIVE: Matches pseudocode specification exactly.
@@ -440,6 +882,8 @@ def calculate_style_eligibility(current_time_str, micro_context, morning_plan, o
         or_data: Dict with OR high/low/range
         current_price: Current price (float)
         expected_move: Dict with or_range, volatility_of_day, expected_move_low/high
+        today_5min: List of 5-min candles for regime classification
+        intraday_state: "TREND_UP"|"TREND_DOWN"|"RANGE"|"COMPRESSION"|"OPENING_RANGE"
     """
     if not current_time_str or current_time_str == "N/A":
         return {}
@@ -457,108 +901,72 @@ def calculate_style_eligibility(current_time_str, micro_context, morning_plan, o
         "LATE_SESSION_RISK_OFF": False
     }
     
-    # Extract helper facts
-    swing = micro_context.get('swing_context', 'RANGE_SWING')
-    behavior = micro_context.get('price_behavior', 'IN_RANGE')
-    vol_behavior = micro_context.get('volume_behavior', 'NORMAL')
-    retracement = micro_context.get('retracement_depth', 'UNCERTAIN')
-    compression = micro_context.get('compression_ratio', 1.0)
-    
-    personality = morning_plan.get('market_personality', 'CHOPPY')
-    boundaries = morning_plan.get('boundary_levels', {})
-    support = boundaries.get('support_zone', 0)
-    resistance = boundaries.get('resistance_zone', 0)
-    pivot = boundaries.get('pivot_point', 0)
-    
-    # Expected Move envelope
-    em_or_range = expected_move.get('or_range', 0)
-    em_low = expected_move.get('expected_move_low', 0)
-    em_high = expected_move.get('expected_move_high', 0)
-    volatility_of_day = expected_move.get('volatility_of_day', 'NORMAL')
+    # -------------------------------------------------------------------
+    # PHASE 2.5: OPENING AUCTION REGIME
+    # -------------------------------------------------------------------
+    # Calculate OR Regime if we have enough 5-min data
+    or_range = or_data.get('or_range') if or_data else expected_move.get('or_range', 0)
+    or_regime = calculate_or_regime(today_5min, or_range)
     
     # -------------------------------------------------------------------
-    # STYLE 1: OPENING_RANGE_EXPANSION
-    # Time: 09:20-10:00
-    # Condition: BREAKOUT + (NORMAL or HIGH volatility) + or_range > 0
+    # STATE MACHINE OVERRIDES (HIERARCHY ENFORCEMENT)
     # -------------------------------------------------------------------
-    if (
-        920 <= hr_min <= 1000
-        and behavior == "BREAKOUT"
-        and volatility_of_day in ("NORMAL", "HIGH")
-        and em_or_range > 0
-    ):
-        styles["OPENING_RANGE_EXPANSION"] = True
     
-    # -------------------------------------------------------------------
-    # STYLE 2: RANGE_EXTREME_MEAN_REVERSION (ADVANCED FIX - JAN 14)
-    # Market: CHOPPY
-    # Scoring: Location + Failure to Extend + Stall + Rejection
-    # Threshold: EM High >= 25 pts, REMR_Confidence >= 0.45
-    # -------------------------------------------------------------------
-    if personality == "CHOPPY" and em_high >= 25:
-        # 1. Location Weight (0.50)
-        proximity = 0.15 * em_or_range if em_or_range > 0 else 15
-        in_location = abs(current_price - support) <= proximity or abs(current_price - resistance) <= proximity
-        loc_score = 0.50 if in_location else 0.0
-        
-        # 2. Failure to Extend (0.30)
-        failure_score = 0.30 if micro_context.get('failure_to_extend') else 0.0
-        
-        # 3. Micro Alignment (0.20) - Bias/Stall/Rejection alignment
-        alignment = micro_context.get('stall_at_level') or micro_context.get('rejection') or micro_context.get('weak_follow_through')
-        alignment_score = 0.20 if alignment else 0.0
-        
-        remr_confidence = loc_score + failure_score + alignment_score
-        
-        if remr_confidence >= 0.45:
-            styles["RANGE_EXTREME_MEAN_REVERSION"] = True
-            # Optional: Log the confidence if needed, for now just set eligibility
-    
-    # -------------------------------------------------------------------
-    # STYLE 3: INTRADAY_TREND_CONTINUATION
-    # Market: TRENDING
-    # Veto: Failure to Accept (Binary Structural Veto)
-    # Threshold: EM High >= 40 pts
-    # -------------------------------------------------------------------
-    valid_retracement = retracement in ("38.2", "50", "SHALLOW", "NORMAL")
-    fta_veto = micro_context.get('failure_to_accept', False)
-    impulse_ok = micro_context.get('impulse_detected', False)
-    
-    if (
-        personality == "TRENDING"
-        and swing in ("UP_SWING", "DOWN_SWING", "BULLISH_SWING", "BEARISH_SWING")
-        and valid_retracement
-        and vol_behavior in ("EXPANDING", "EXPANDING_ON_GREEN", "EXPANDING_ON_RED")
-        and em_high >= 40
-        and impulse_ok
-        and not fta_veto
-    ):
+    # 1. TREND MODE (ITC Dominance)
+    if "TREND" in intraday_state:
+        # User Rule: "Once ITC enabled: Disable REMR entirely."
         styles["INTRADAY_TREND_CONTINUATION"] = True
+        styles["RANGE_EXTREME_MEAN_REVERSION"] = False
+        styles["OPENING_RANGE_EXPANSION"] = False 
+        styles["VOLATILITY_BREAK"] = False
+        return styles
+
+    # 2. RANGE / OPENING MODE
+    # Extract helper facts
+    behavior = micro_context.get('price_behavior', 'IN_RANGE')
+    rejection = micro_context.get('rejection', False)
+    rej_pattern = micro_context.get('rejection_pattern', "NONE")
+    m_slope = micro_context.get('momentum_slope', 0.0)
     
-    # -------------------------------------------------------------------
-    # STYLE 4: VOLATILITY_BREAK
-    # Compression: ratio <= 0.7
-    # Behavior: BREAKOUT
-    # Volume: EXPANDING
-    # Volatility: HIGH
-    # -------------------------------------------------------------------
-    if (
-        compression <= 0.7
-        and behavior == "BREAKOUT"
-        and vol_behavior in ("EXPANDING", "EXPANDING_ON_GREEN", "EXPANDING_ON_RED")
-        and volatility_of_day == "HIGH"
-    ):
+    # STYLE 1: OPENING_RANGE_EXPANSION (ORE)
+    # Only allowed in DISCOVERY or FAILURE (extension)
+    if 920 <= hr_min <= 1030:
+        if or_regime == "DISCOVERY" and behavior == "BREAKOUT":
+            styles["OPENING_RANGE_EXPANSION"] = True
+
+    # STYLE 2: RANGE_EXTREME_MEAN_REVERSION (REMR)
+    # Behavioral Gate: If early (<10:00), strict rejection requirement
+    if hr_min < 1000:
+        if behavior.startswith("REJECTION") and rejection:
+             styles["RANGE_EXTREME_MEAN_REVERSION"] = True
+        else:
+             styles["RANGE_EXTREME_MEAN_REVERSION"] = False
+    else:
+        # Mid-day REMR more permissive but still needs stall or rejection
+        if behavior in ["STALL_AT_LEVEL", "FAILURE_TO_EXTEND"] or rejection:
+            styles["RANGE_EXTREME_MEAN_REVERSION"] = True
+
+    # STYLE 3: INTRADAY_TREND_CONTINUATION (ITC)
+    # Allowed if State Machine detects TREND or if we have STABLE break or V-Reversal
+    v_rev = micro_context.get('v_reversal', False)
+    if intraday_state in ["TREND_UP", "TREND_DOWN"] or v_rev:
+        styles["INTRADAY_TREND_CONTINUATION"] = True
+
+    # 3. COMPRESSION MODE (VBD Dominance)
+    if intraday_state == "COMPRESSION":
         styles["VOLATILITY_BREAK"] = True
+        styles["RANGE_EXTREME_MEAN_REVERSION"] = False 
     
-    # -------------------------------------------------------------------
-    # STYLE 5: LATE_SESSION_RISK_OFF
-    # Time: >= 14:30
-    # Rule: NO NEW POSITIONS
-    # -------------------------------------------------------------------
+    # LATE SESSION GUARD
     if hr_min >= 1430:
         styles["LATE_SESSION_RISK_OFF"] = True
-    
+        for s in styles: 
+            if s != "LATE_SESSION_RISK_OFF": styles[s] = False
+        
     return styles
+        
+    return styles
+    
 
 def calculate_morning_context(daily_hist, current_price, support, resistance, pivot, vix, atr_14):
     """
@@ -627,3 +1035,53 @@ def calculate_morning_context(daily_hist, current_price, support, resistance, pi
         "invalidation_level": invalidation_level,
         "max_expected_move": int(expected_range)
     }
+
+# ============================================================================
+# CANONICAL SECTION 4: INTRADAY STATE MACHINE
+# ============================================================================
+def calculate_intraday_state(current_price, or_high, or_low, bars_15min, atr):
+    """
+    Determines the Behavioral State of the market.
+    Follows 'Intraday Decision Constitution' rules.
+    
+    States:
+    - OPENING_RANGE (First 45 mins - Handled by Caller mostly)
+    - TREND_UP (Breakout above OR High)
+    - TREND_DOWN (Breakdown below OR Low)
+    - RANGE (Inside OR)
+    - COMPRESSION (Tight range, pending break)
+    """
+    state = "RANGE"
+    reason = "Inside Opening Range"
+    
+    # Safety
+    if not bars_15min or not atr:
+        return "UNKNOWN", "Insufficient Data"
+        
+    last_close = bars_15min[-1]['c']
+    
+    # Define Buffers (Noise Filter)
+    # 0.2 ATR is roughly 10-15 points on Nifty
+    buffer = 0.2 * atr
+    
+    # 1. Trend Detection (Breakout/Breakdown)
+    if last_close > (or_high + buffer):
+        state = "TREND_UP"
+        reason = f"Breakout above OR High ({or_high:.1f}) + Buffer"
+    elif last_close < (or_low - buffer):
+        state = "TREND_DOWN"
+        reason = f"Breakdown below OR Low ({or_low:.1f}) - Buffer"
+        
+    # 2. Compression Detection
+    # If state is RANGE, check for tightness
+    if state == "RANGE" and len(bars_15min) >= 3:
+        # Check last 3 bars range
+        recent_high = max(b['h'] for b in bars_15min[-3:])
+        recent_low = min(b['l'] for b in bars_15min[-3:])
+        recent_range = recent_high - recent_low
+        
+        if recent_range < 0.5 * atr:
+             state = "COMPRESSION"
+             reason = "Volatility Compression (< 0.5 ATR)"
+
+    return state, reason

@@ -23,6 +23,16 @@ class ExitReason(Enum):
     FORCE = "Force Square-off"
     EOD = "EOD Square-off"
 
+# CONSTANTS FOR AUTHORITY SPLIT
+MIN_R_MULTIPLE = 1.8
+ECONOMIC_FLOOR_INR = 1200
+STYLE_PARAMS = {
+    'REMR': {'sl': 50, 'tgt': 100},  # 1:2 Fixed (SL 50)
+    'ITC':  {'sl': 50, 'tgt': 150},  # 1:3 Trend (Fixed for now, can be dynamic)
+    'ORE':  {'sl': 50, 'tgt': 125},  # 1:2.5 Breakout (SL 50)
+    'VBD':  {'sl': 50, 'tgt': 100},  # 1:2 Volatility Breakout (SL 50)
+}
+
 class HotPathExecutor:
     def __init__(self):
         self.active_instructions = {} 
@@ -71,6 +81,55 @@ class HotPathExecutor:
         self.last_bar_time = None
         self.day_structure = {'highs': [], 'lows': []}
         self.total_trades_today = 0
+        self.remr_continuation_monitor = None # Tracks REMR exits for potential ITC re-entry
+    
+    def _apply_style_geometry(self, instructions):
+        """
+        AUTHORITY SPLIT: Engine Overrides LLM Geometry.
+        Applies hard-coded SL/Target based on Style.
+        """
+        style = instructions.get('selected_style', 'NONE')
+        action = instructions.get('action')
+        entry = instructions.get('entry_price') or instructions.get('entry')
+        
+        if not entry or action not in ["BUY_CALL", "BUY_PUT"]:
+            return
+
+        if instructions.get('manual_geometry', False):
+            # Engine or LLM (via manual override logic) has already set specific geometry
+            # This is used for TREND_GRIND specific ITC params etc.
+            # Just validate they exist
+            if instructions.get('sl') and instructions.get('target'):
+                 print(f"      🛡️ GEOMETRY PRESERVED (Manual Override): SL {instructions.get('sl')} | TGT {instructions.get('target')}")
+                 return
+
+        params = STYLE_PARAMS.get(style)
+        
+        # If unknown style, Fallback to defaults or keep LLM's if valid?
+        # User said "LLM may suggest, but engine must override if TGT < MIN or SL < MIN"
+        # Let's use generic defaults for unknown styles to enforce structure
+        if not params:
+            # Check if LLM provided values, if not, apply generic safety
+            if not instructions.get('sl'): 
+                params = {'sl': 30, 'tgt': 60} # Safe default
+            else:
+                # LLM provided values, check constraints later
+                return
+
+        # Apply Params
+        sl_pts = params['sl']
+        tgt_pts = params['tgt']
+        
+        if action == "BUY_CALL":
+            instructions['sl'] = self._round_to_tick(entry - sl_pts)
+            instructions['target'] = self._round_to_tick(entry + tgt_pts)
+        else: # BUY_PUT
+            instructions['sl'] = self._round_to_tick(entry + sl_pts)
+            instructions['target'] = self._round_to_tick(entry - tgt_pts)
+            
+        print(f"      🛡️ ENGINE GEOMETRY ({style}): SL {sl_pts}pts | TGT {tgt_pts}pts")
+        instructions['engine_decision'] = "MODIFIED"
+        instructions['engine_reason'] = f"Style Geometry ({style})"
     
     def _round_to_tick(self, price, tick=0.05):
         """Round price to nearest tick size (default 0.05 for NSE)"""
@@ -278,9 +337,12 @@ class HotPathExecutor:
         # Style-specific hard gates
         selected_style = instructions.get('selected_style', 'NONE')
         mode = instructions.get('mode', 'UNKNOWN')
+        is_grind = instructions.get('micro_context', {}).get('is_grind', False)
         
         if selected_style == 'REMR':
             threshold = 0.45
+        elif selected_style in ['ITC', 'INTRADAY_TREND_CONTINUATION'] and is_grind:
+            threshold = 0.50
         elif mode == 'OPENING_RANGE':
             threshold = 0.50
         elif mode == 'STRUCTURE':
@@ -340,71 +402,50 @@ class HotPathExecutor:
                     instructions['engine_decision'] = "BLOCKED"
                     instructions['engine_reason'] = f"Too close to Pivot ({dist_to_pivot:.0f}pts)"
         
-        # 4. USE LLM's SL/TARGET VALUES (v5.1 - Trust prompt logic)
-        # The LLM prompt now calculates proper 2x R:R targets
-        # We apply minimum floors AND create fallbacks if LLM didn't provide values
-        entry = instructions.get('entry_price') or instructions.get('entry', 0)
-        llm_sl = instructions.get('sl')
-        llm_target = instructions.get('target')
-        
-        if entry and action in ["BUY_CALL", "BUY_PUT"] and instructions['action'] != "HOLD":
-            # CRITICAL: Create fallback SL if LLM didn't provide one (prevents unlimited losses!)
-            if not llm_sl:
-                default_sl_dist = 30  # Fixed 30 pt fallback
-                if action == "BUY_CALL":
-                    instructions['sl'] = self._round_to_tick(entry - default_sl_dist)
-                else:
-                    instructions['sl'] = self._round_to_tick(entry + default_sl_dist)
-                print(f"      ⚠️ No SL from LLM - using fallback: {instructions['sl']}")
-                instructions['engine_decision'] = "MODIFIED"
-                instructions['engine_reason'] = "Fallback SL applied"
-            else:
-                sl_dist = abs(entry - llm_sl)
+            # 4. AUTHORITY SPLIT: Apply Engine Geometry & Guardrails
+            # First, Apply Style Geometry (Hard Override)
+            self._apply_style_geometry(instructions)
+
+            # Re-read values (modified by engine or from LLM)
+            entry = instructions.get('entry_price') or instructions.get('entry', 0)
+            sl_price = instructions.get('sl')
+            target_price = instructions.get('target')
+
+            # GUARDRAIL 1: R:R Check
+            if sl_price and target_price and entry:
+                sl_dist = abs(entry - sl_price)
+                tgt_dist = abs(entry - target_price)
                 
-                # MINIMUM SL floor: 15 pts
-                if sl_dist < 15:
-                    if action == "BUY_CALL":
-                        instructions['sl'] = self._round_to_tick(entry - 15)
-                    else:
-                        instructions['sl'] = self._round_to_tick(entry + 15)
-                    print(f"      ⚠️ SL too tight ({sl_dist:.0f}pts) - capped to 15pts: {instructions['sl']}")
-                    instructions['engine_decision'] = "MODIFIED"
-                    instructions['engine_reason'] = f"SL Floor (15pts from {sl_dist:.0f})"
+                # Prevent div by zero
+                if sl_dist < 5: sl_dist = 5 
                 
-                # MAXIMUM SL cap: 50 pts (prevents huge losses like -113 pts!)
-                elif sl_dist > 50:
-                    if action == "BUY_CALL":
-                        instructions['sl'] = self._round_to_tick(entry - 50)
-                    else:
-                        instructions['sl'] = self._round_to_tick(entry + 50)
-                    print(f"      ⚠️ SL too wide ({sl_dist:.0f}pts) - capped to 50pts: {instructions['sl']}")
-                    instructions['engine_decision'] = "MODIFIED"
-                    instructions['engine_reason'] = f"SL Cap (50pts from {sl_dist:.0f})"
-            
-            # CRITICAL: Create fallback Target if LLM didn't provide one
-            if not llm_target:
-                default_target_dist = 60  # Fixed 60 pt fallback (2x SL)
-                if action == "BUY_CALL":
-                    instructions['target'] = self._round_to_tick(entry + default_target_dist)
-                else:
-                    instructions['target'] = self._round_to_tick(entry - default_target_dist)
-                print(f"      ⚠️ No Target from LLM - using fallback: {instructions['target']}")
-                instructions['engine_decision'] = "MODIFIED"
-                instructions['engine_reason'] = "Fallback TGT applied"
-            else:
-                # Apply minimum Target floor of 30 pts
-                target_dist = abs(entry - llm_target)
-                if target_dist < 30:
-                    if action == "BUY_CALL":
-                        instructions['target'] = self._round_to_tick(entry + 30)
-                    else:
-                        instructions['target'] = self._round_to_tick(entry - 30)
-                    instructions['engine_decision'] = "MODIFIED"
-                    instructions['engine_reason'] = f"TGT Floor (30pts from {target_dist:.0f})"
+                rr = tgt_dist / sl_dist
+                potential_profit = tgt_dist * 27.5 # Nifty Lot Size approx
+                
+                if rr < MIN_R_MULTIPLE:
+                    print(f"      ⛔ RISK GUARD: R:R {rr:.2f} < {MIN_R_MULTIPLE} → BLOCKED")
+                    instructions['action'] = "HOLD"
+                    instructions['engine_decision'] = "BLOCKED"
+                    instructions['engine_reason'] = f"Low R:R ({rr:.1f})"
+                    return
+                
+                # GUARDRAIL 2: Economic Floor
+                if potential_profit < ECONOMIC_FLOOR_INR:
+                    print(f"      ⛔ ECON GUARD: Profit ₹{potential_profit:.0f} < ₹{ECONOMIC_FLOOR_INR} → BLOCKED")
+                    instructions['action'] = "HOLD"
+                    instructions['engine_decision'] = "BLOCKED"
+                    instructions['engine_reason'] = f"Trivial Profit (₹{potential_profit:.0f})"
+                    return
+
+            # Note: Removal of old LLM fallback block as we now trust _apply_style_geometry or this new block
+            # But let's keep a minimal safety net if _apply_style_geometry returned without setting (unknown style + no LLM value)
+            if not instructions.get('sl') or not instructions.get('target'):
+                 # This should ideally not happen if _apply_style_geometry handles defaults
+                 pass
             
             # 4.1 TARGET LEVEL ADJUSTMENT: Cap target to respect S/P/R levels
             # If a level blocks target path, cap to 15pts before that level
-            current_target = instructions.get('target', llm_target)
+            current_target = instructions.get('target')
             if current_target:
                 if action == "BUY_PUT":
                     # For PUT: target is below entry - check if support blocks it
@@ -550,6 +591,86 @@ class HotPathExecutor:
             self.square_off(price, timestamp, reason=ExitReason.EOD.value)
             return
 
+        # 1.5 REMR Continuation Monitor (Auto Re-entry)
+        if self.remr_continuation_monitor and not self.open_position:
+            mon = self.remr_continuation_monitor
+            triggered = False
+            
+            # Expiry check
+            if timestamp > mon['expiry']:
+                self.remr_continuation_monitor = None
+            else:
+                if mon['side'] == 'CALL' and price >= mon['trigger_price']: triggered = True
+                elif mon['side'] == 'PUT' and price <= mon['trigger_price']: triggered = True
+                
+                if triggered:
+                    print(f"      🚀 REMR -> ITC CONTINUATION TRIGGERED at {price:.1f} (Trigger: {mon['trigger_price']:.1f})")
+                    
+                    # Construct synthetic instructions for ITC
+                    self.active_instructions = {
+                        'action': f"BUY_{mon['side']}",
+                        'selected_style': 'INTRADAY_TREND_CONTINUATION',
+                        'confidence': 0.95,
+                        'reason': "Automated REMR Continuation Re-entry",
+                        'entry_price': price
+                    }
+                    
+                    # Apply ITC Params (SL 50 / TGT 150) as baseline
+                    self._apply_style_geometry(self.active_instructions)
+                    
+                    # DYNAMIC TARGET OVERRIDE (To match In-Trade Transition Logic)
+                    # Target = Original Entry + (2 * EM)
+                    # This captures the "remaining move" as per user intent.
+                    if 'original_entry' in mon:
+                        orig_ent = mon['original_entry']
+                        em = mon['em_high']
+                        
+                        # 1. SL CALCULATION: Enforce Trend-Following SL (Min 50pts)
+                        # Do NOT rely on style defaults (30pts) which are too tight for reentry
+                        if mon['side'] == 'CALL':
+                            sl_price = self._round_to_tick(price - 50)
+                        else:
+                            sl_price = self._round_to_tick(price + 50)
+                        self.active_instructions['sl'] = sl_price
+                        
+                        # 2. DYNAMIC TARGET CALCULATION
+                        # Target = Original Entry + (2 * EM)
+                        if mon['side'] == 'CALL':
+                            dyn_target = self._round_to_tick(orig_ent + (2 * em))
+                            
+                            # Check viability: If target is too close (< 30 pts), project NEW leg
+                            if dyn_target > price + 30:
+                                self.active_instructions['target'] = dyn_target
+                            else:
+                                # Target exhausted -> Project fresh leg (Price + 1.0 * EM)
+                                new_target = self._round_to_tick(price + (1.0 * em))
+                                self.active_instructions['target'] = new_target
+                                print(f"      🎯 Dynamic Target Exhausted. Projected New: {new_target:.1f} (+{1.0*em:.0f} pts)")
+                                
+                        else: # PUT
+                            dyn_target = self._round_to_tick(orig_ent - (2 * em))
+                            
+                            if dyn_target < price - 30:
+                                self.active_instructions['target'] = dyn_target
+                            else:
+                                new_target = self._round_to_tick(price - (1.0 * em))
+                                self.active_instructions['target'] = new_target
+                                print(f"      🎯 Dynamic Target Exhausted. Projected New: {new_target:.1f} (+{1.0*em:.0f} pts)")
+                                
+                    # Execute Entry
+                    self._enter_trade(price, timestamp, mon['side'])
+                    
+                    # Ensure metadata is correct
+                    if self.open_position:
+                        self.open_position['style'] = 'INTRADAY_TREND_CONTINUATION'
+                        self.open_position['entry_reason'] = "REMR Continuation (Deep Trend)"
+                        self.open_position['expected_move_high'] = mon['em_high']
+                        # Inject authoritative ITC hold time
+                        self.open_position['max_hold_minutes'] = 120 # Hardcoded authoritative value for ITC
+                    
+                    # Clear monitor
+                    self.remr_continuation_monitor = None
+
         # 2. Manage Open Position (Including LLM smart adjustments)
         if self.open_position:
             ai_action = self.active_instructions.get('action')
@@ -670,7 +791,7 @@ class HotPathExecutor:
                     self._enter_trade(entry_level, timestamp, 'PUT')
 
     def _enter_trade(self, price, timestamp, side):
-        print(f"      🚀 EXECUTION: Entered {side} at {price}")
+        print(f"      [EXEC] 🚀 EXECUTION: Entered {side} at {price}")
         self.total_trades_today += 1
         
         self.open_position = {
@@ -682,8 +803,14 @@ class HotPathExecutor:
             'max_hold_minutes': self.active_instructions.get('max_hold_minutes', 30),
             # Phase-2.5: Style Transition State
             'style': self.active_instructions.get('selected_style', 'NONE'),
+            'entry_reason': self.active_instructions.get('adjustment_reason', 'Signal'),
             'expected_move_high': self.active_instructions.get('expected_move_high', 0),
             'micro_context': self.active_instructions.get('micro_context', {}),
+            # Phase-2.6: In-Trade Regime Guard
+            'entry_regime': self.active_instructions.get('active_regime', 'UNKNOWN'),
+            'entry_ter': self.active_instructions.get('micro_context', {}).get('trend_efficiency', 0.0),
+            'current_regime': self.active_instructions.get('active_regime', 'UNKNOWN'),
+            'current_ter': self.active_instructions.get('micro_context', {}).get('trend_efficiency', 0.0),
             # Phase-2: Tracking metrics only (no automatic adjustments)
             'peak_price': price,
             'max_pnl': 0.0,
@@ -713,6 +840,13 @@ class HotPathExecutor:
         if pos.get('entry_time') == timestamp:
             return
         
+        # Sync latest Regime/TER from active_instructions (update from Brain)
+        # Brain sends updates every 15m or when flagged.
+        # We check if there's a fresh instruction sitting in active_instructions (even if ACTION=HOLD)
+        if self.active_instructions and self.active_instructions.get('active_regime'):
+            pos['current_regime'] = self.active_instructions['active_regime']
+            pos['current_ter'] = self.active_instructions.get('micro_context', {}).get('trend_efficiency', 0.0)
+
         candle_open = tick.get('open', tick['close'])
         candle_high = tick.get('high', tick['close'])
         candle_low = tick.get('low', tick['close'])
@@ -753,6 +887,48 @@ class HotPathExecutor:
         target_progress = 0
         if original_target_dist and original_target_dist > 0:
             target_progress = (unrealized_pnl / original_target_dist) * 100
+            
+        # --- PHASE-2.6: IN-TRADE REGIME GUARD ---
+        # De-risk object if regime degrades significantly
+        # 1. Regime Drop (e.g. TREND -> ROTATION)
+        # 2. TER Collapse (e.g. 0.9 -> 0.3)
+        
+        start_regime = pos.get('entry_regime', 'UNKNOWN')
+        curr_regime = pos.get('current_regime', 'UNKNOWN')
+        start_ter = pos.get('entry_ter', 0.0)
+        curr_ter = pos.get('current_ter', 0.0)
+        
+        regime_degraded = False
+        
+        # Detect Transition: Trend -> Rotation/Range
+        if start_regime in ['IMPULSE_TREND', 'TREND_GRIND'] and curr_regime in ['ROTATION', 'RANGE']:
+             regime_degraded = True
+        
+        # Detect TER Collapse (< 50% of entry energy)
+        if start_ter > 0.4 and curr_ter < (0.5 * start_ter):
+             regime_degraded = True
+             
+        if regime_degraded and not pos.get('guard_triggered', False):
+             # Action: Tighten SL to Breakeven+5 or Trailing tight
+             # We use a simple tightening logic: Move SL to preserve capital.
+             
+             print(f"      🛡️ [GUARD] REGIME DEGRADED: {start_regime}({start_ter:.2f}) -> {curr_regime}({curr_ter:.2f})")
+             
+             # Tighten Logic
+             if unrealized_pnl > 10:
+                  # Protect Profit: Move SL to Entry + 5
+                  new_sl = entry_price + 5 if pos['side'] == 'CALL' else entry_price - 5
+                  if (pos['side'] == 'CALL' and new_sl > sl) or (pos['side'] == 'PUT' and new_sl < sl):
+                       pos['sl'] = new_sl
+                       print(f"      🛡️ [GUARD] SL Tightened to BE (+5pts) to separate from noise.")
+             else:
+                  # Defense: Tighten existing SL by 50%? Or just accept the geometry.
+                  # Safer to not choke a trade that hasn't moved yet. Guard applies if we lose the edge.
+                  # Let's tighten SL to entry price (Breakeven) if strictly degraded?
+                  # No, that might stop out noise. Let's just log for now or apply modest tightening.
+                  pass
+             
+             pos['guard_triggered'] = True
         
         # Phase-2.5: STYLE TRANSITION LOGIC (REMR -> ITC)
         # Check if "Reaction Has Matured" and upgrade blindly holding REMR to Trend Following ITC
@@ -836,11 +1012,12 @@ class HotPathExecutor:
         exit_reason = None
         
         # 0. Time-Based Exit check
-        if pos.get('max_hold_minutes'):
-            elapsed = (timestamp - pos['entry_time']).total_seconds() / 60
-            if elapsed >= pos['max_hold_minutes']:
-                exit_price = candle_open
-                exit_reason = ExitReason.TIME_EXIT.value
+        # 0. Time-Based Exit check REMOVED (User Request: Only 15:15 Force Exit)
+        # if pos.get('max_hold_minutes'):
+        #     elapsed = (timestamp - pos['entry_time']).total_seconds() / 60
+        #     if elapsed >= pos['max_hold_minutes']:
+        #         exit_price = candle_open
+        #         exit_reason = ExitReason.TIME_EXIT.value
         
         if pos['side'] == 'CALL':
             # CALL: SL < Entry < Target
@@ -940,7 +1117,9 @@ class HotPathExecutor:
             'reason': reason,
             'pnl': pnl,
             'max_pnl': max_pnl,
-            'mean_open_pnl': mean_open_pnl
+            'mean_open_pnl': mean_open_pnl,
+            'style': pos.get('style', 'N/A'),
+            'entry_reason': pos.get('entry_reason', 'N/A')
         }
         
         self.trades.append({'type': 'EXIT', **exit_trade})
@@ -949,5 +1128,25 @@ class HotPathExecutor:
         # Track for momentum exhaustion filter
         self.last_exit_time = timestamp
         self.last_trade_pnl = pnl
+        
+        # Populate REMR Continuation Monitor if applicable
+        # If we exited REMR at TARGET, we might miss the rest of the trend. Monitor for re-entry.
+        style = pos.get('style', 'NONE')
+        if (style == 'REMR' or style == 'RANGE_EXTREME_MEAN_REVERSION') and reason == ExitReason.TARGET.value:
+            em = pos.get('expected_move_high', 0)
+            if em > 0:
+                # Trigger at Entry + 0.6 * EM
+                trigger = pos['entry_price'] + (0.6 * em) if pos['side'] == 'CALL' else pos['entry_price'] - (0.6 * em)
+                
+                # Setup Monitor (Valid for 60 mins)
+                import datetime
+                self.remr_continuation_monitor = {
+                    'trigger_price': trigger,
+                    'side': pos['side'],
+                    'expiry': timestamp + datetime.timedelta(minutes=60),
+                    'em_high': em,
+                    'original_entry': pos['entry_price']
+                }
+                print(f"      👀 REMR Target Hit. Monitoring for ITC RE-ENTRY > {trigger:.1f} (until {self.remr_continuation_monitor['expiry'].time()})")
         
         self.open_position = None

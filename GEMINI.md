@@ -98,3 +98,9 @@ The system is divided into two distinct authorities. Understanding this is criti
 - **Solution**: Use **Progress Since Open** (`Current Close - Intraday Open`) as the authoritative baseline for alignment.
 - **Rule**: A `BUY_CALL` override only triggers if price is ABOVE the intraday open, regardless of micro-vips.
 - **Location**: Updated in [get_tactical_update](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/brain/llm_client.py#L916-925).
+
+### UI & Log Refinement Protocol
+- **The Pitfall**: Assuming `JSON` payload keys automatically translate to visible text in Telegram/UI.
+- **The Reality**: Third-party services (n8n, frontends) often use hardcoded templates or only extract specific fields. Adding a new key like `'balance'` to the JSON is useless if the `message` string isn't updated to include it.
+- **The Fix**: **Explicit Text Injection**. If you want data to be visible, inject it directly into the `message` (Status) or `reason` (Trace) string fields.
+- **Verification Rule**: Use `print(f"<<<TELEGRAM {type}>>> {json_str} <<<END>>>")` in `base_mode.py` to visually inspect the exact payload leaving the engine. Do not guess.

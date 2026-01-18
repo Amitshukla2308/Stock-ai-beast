@@ -323,6 +323,80 @@ class BacktestMode(BaseMode):
                 if bal_summary['wipeout_count'] > 0:
                      report_text += f"• 💀 Wipeouts: {bal_summary['wipeout_count']}\n"
 
+            # --- NEW REGIME ANALYTICS (User Request) ---
+            try:
+                ledger = self.hot_path.trade_ledger
+                report_text += f"\n*🔬 Regime Analytics:*\n"
+                
+                regime_stats = {} # {regime: [pnl]}
+                hold_times = []
+                sides = {'CALL': 0, 'PUT': 0}
+                dir_aligned_wins = 0
+                profitable_trades = 0
+                
+                for t in ledger:
+                    # Filter for this session only (if hot_path is reused, though currently distinct per mode)
+                    # Assuming ledger matches session.
+                    pnl = t.get('pnl', 0)
+                    if pnl is None: continue
+                    
+                    # Regime Extraction
+                    uc = t.get('micro_context', {})
+                    reg = uc.get('trend_regime', 'ROTATION')
+                    if uc.get('is_grind'): reg = 'TREND_GRIND'
+                    
+                    if reg not in regime_stats: regime_stats[reg] = []
+                    regime_stats[reg].append(pnl)
+                    
+                    # Side
+                    s = t.get('side', 'UNKNOWN')
+                    if 'CALL' in s: sides['CALL'] += 1
+                    elif 'PUT' in s: sides['PUT'] += 1
+                    
+                    # Hold Time
+                    et = t.get('entry_time')
+                    xt = t.get('exit_time')
+                    if et and xt:
+                        # Handle string/datetime mix
+                        try:
+                            if isinstance(et, str): et = datetime.fromisoformat(str(et))
+                            if isinstance(xt, str): xt = datetime.fromisoformat(str(xt))
+                            dt = (xt - et).total_seconds() / 60
+                            hold_times.append(dt)
+                        except: pass
+                    
+                    # Directional Accuracy (NetProgress matches Winner)
+                    np = uc.get('net_progress_3', 0)
+                    is_profit = pnl > 0
+                    if is_profit: profitable_trades += 1
+                    
+                    aligned = False
+                    if np > 0 and 'CALL' in s: aligned = True
+                    if np < 0 and 'PUT' in s: aligned = True
+                    
+                    if is_profit and aligned: dir_aligned_wins += 1
+                
+                # Stats Output
+                for r, pnls in regime_stats.items():
+                    c = len(pnls)
+                    avg = sum(pnls)/c if c else 0
+                    w = len([x for x in pnls if x > 0])
+                    wr = (w/c*100) if c else 0
+                    report_text += f"• {r}: {c} tx | Exp: {avg:+.1f} pts | WR: {wr:.0f}%\n"
+                
+                avg_hold = sum(hold_times)/len(hold_times) if hold_times else 0
+                dir_acc = (dir_aligned_wins/profitable_trades*100) if profitable_trades else 0
+                
+                report_text += f"• Avg Hold Time: {avg_hold:.1f} min\n"
+                report_text += f"• CALL/PUT Ratio: {sides['CALL']}:{sides['PUT']}\n"
+                report_text += f"• Dir. Accuracy: {dir_acc:.1f}% (NetProg on Winners)\n"
+                
+                # Log for debug
+                logger.info(f"   🔬 Regime Stats: {json.dumps({k:len(v) for k,v in regime_stats.items()})}")
+                
+            except Exception as reg_err:
+                logger.error(f"   ⚠️ Regime metrics failed: {reg_err}")
+
             # TELEGRAM NOTIFICATION (Final Summary)
             summary_payload = {
                 "total_pnl": total_pnl,
@@ -532,9 +606,13 @@ class BacktestMode(BaseMode):
                     # Force TELEGRAM Status update (Visible to User)
                     atr_val = getattr(self, 'last_atr', 'N/A')
                     vix_val = getattr(self, 'last_vix', 'N/A')
-                    hb_msg = f"💓 *Heartbeat* [{current_time.strftime('%H:%M')}]\nPrice: {tick['close']:.1f}\nAction: {instr}"
+                    hb_msg = f"💓 *Heartbeat* [{current_time.strftime('%H:%M')} {current_time.strftime('%d-%m-%Y')}]\nPrice: {tick['close']:.1f}\nAction: {instr}"
                     if atr_val != 'N/A': hb_msg += f"\nVol: ATR {atr_val:.1f} | VIX {vix_val}"
                     if open_pnl_str: hb_msg += f"\n{open_pnl_str.strip()}"
+                    
+                    # Add Balance (Smart Log Request)
+                    current_bal = self.balance_monitor.current_balance
+                    hb_msg += f"\n💰 Balance: ₹{current_bal:,.0f}"
 
                     self._emit_telegram_event("STATUS", {
                         "date": current_time.strftime('%Y-%m-%d'),
@@ -706,7 +784,8 @@ class BacktestMode(BaseMode):
                 "vix_regime": brief.get('risk_regime', {}).get('vix_state', 'NORMAL'),
                 "gap": gap_str,
                 "prev_close": mb_context.get('daily_3', [{}])[0].get('c', 'N/A') if mb_context.get('daily_3') else 'N/A'
-            }
+            },
+            "balance": self.balance_monitor.current_balance
         }, mode_tag="BACKTEST")
 
     def trigger_tactical_update(self, tick):
@@ -849,7 +928,7 @@ class BacktestMode(BaseMode):
                         
                         trace_payload = {
                             "llm_type": trace_title,
-                            "time": tick['timestamp'].strftime('%H:%M'),
+                            "time": tick['timestamp'].strftime('%H:%M %d-%m-%Y'),
                             "tick_time": str(instructions.get('tick_time', 'N/A')),
                             "mode": instructions.get('mode', 'UNKNOWN'),
                             "selected_style": instructions.get('selected_style', 'NONE'),
@@ -857,7 +936,7 @@ class BacktestMode(BaseMode):
                             "confidence": instructions.get('confidence', 0.0),
                             "sl_points": instructions.get('sl_points'),
                             "target_points": instructions.get('target_points'),
-                            "reason": instructions.get('technical_reason', instructions.get('reason', 'N/A')),
+                            "reason": f"{instructions.get('technical_reason', instructions.get('reason', 'N/A'))}\n\n💰 Balance: ₹{self.balance_monitor.current_balance:,.0f}",
                             "engine_decision": instructions.get('engine_decision', 'EXECUTED'),
                             "engine_reason": instructions.get('engine_reason'),
                             "last_3_candles": last_3_candles,
@@ -934,7 +1013,8 @@ class BacktestMode(BaseMode):
             "total_pnl": stats.get('total_pnl'),
             "trades": stats.get('trade_count'),
             "win_rate": stats.get('win_rate'),
-            "nugget": audit_res.get('dataset_nugget', audit_res.get('nugget_good', 'N/A'))
+            "nugget": audit_res.get('dataset_nugget', audit_res.get('nugget_good', 'N/A')),
+            "balance": self.balance_monitor.current_balance
         }, mode_tag="BACKTEST")
 
         # --- EMIT LLM_TRACE (UPGRADE) ---
