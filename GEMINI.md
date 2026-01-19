@@ -2,6 +2,9 @@
 
 This document serves as the **Long-Term Memory** for developers (AI and Human) working on the Beast. It captures critical pitfalls, philosophy, and strategies to implement complex business logic changes faster.
 
+> [!TIP]
+> **End-to-End Data Flow**: For a visual and technical map of how data moves from Market -> Enrichment -> LLM -> Engine -> Executor, see **[SYSTEM_FLOW.md](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/SYSTEM_FLOW.md)**.
+
 ## 🏛️ Core Philosophy: Authority Split
 The system is divided into two distinct authorities. Understanding this is critical for any logic change.
 
@@ -113,3 +116,12 @@ The system is divided into two distinct authorities. Understanding this is criti
 - **The Fix**: When changing function return values, **grep ALL return statements** in that function first.
 - **Example**: Changed `calculate_trend_efficiency` to return `(ter, regime, regime_momentum)`, but line 193 early return still had `return 0.0, "ROTATION"` (missing 3rd value).
 - **Rule**: `git grep "return" <filename>` before assuming infrastructure issues. Code first, Docker second.
+
+### 🚨 CASE STUDY: The "Premature Return" Dead Code Trap (Phase 2.7)
+- **The Pitfall**: Implementing complex logic changes (like Phase 2.6 Symmetric Gating) but seeing **zero changes** in system behavior or logs during backtests.
+- **The Symptom**: Backtests for known problematic days (e.g., Jan 9th) continued to show 0 trades despite adding new "Regime Momentum" filters. 
+- **Root Cause Analysis (RCA)**: A legacy `return data` statement remained at line 928 of `llm_client.py` from a previous refactor. 
+- **Impact**: ~800 lines of downstream logic—including all Phase 2.6 Metric Authority, Trend Acceptance, and Phase 2.7 fixes—were rendered **unreachable**.
+- **The Lesson**: When a function evolves into multiple layers, an early return can silently kill entire features.
+- **The Fix**: Consolidate functional layers. Instead of returning mid-function, use state variables (e.g., `data['action'] = "HOLD"`) and allow the function to reach its final, authoritative return point.
+- **Verification Rule**: If you add new `logger` lines and they **NEVER** appear in the logs (even when they should be triggered), assume the code execution path is broken. Check for early returns or exception blocks that swallow the flow.

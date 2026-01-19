@@ -974,7 +974,7 @@ def calculate_style_eligibility(current_time_str, micro_context, morning_plan, o
         styles["RANGE_EXTREME_MEAN_REVERSION"] = False 
     
     # LATE SESSION GUARD
-    if hr_min >= 1430:
+    if hr_min >= 1450:
         styles["LATE_SESSION_RISK_OFF"] = True
         for s in styles: 
             if s != "LATE_SESSION_RISK_OFF": styles[s] = False

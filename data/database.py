@@ -177,7 +177,7 @@ def init_db():
     conn.close()
     print(f"✅ Database initialized at {DB_PATH}")
 
-def fetch_context_data(timestamp, symbol="BANKNIFTY"):
+def fetch_context_data(timestamp, symbol="BANKNIFTY", resolution="1"):
     """
     Fetch context for the Brain:
     1. Last 3 Days (Daily Aggregated OHLC)
@@ -216,23 +216,9 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
         SELECT * FROM daily ORDER BY date DESC LIMIT 6
     """
     
-    # 2. Last 14 15-min Candles (limited to last 7 days for performance)
-    intraday_15min_query = """
-        SELECT 
-            time_bucket(INTERVAL '15 minutes', timestamp) AS ts,
-            first(open) as open,
-            max(high) as high,
-            min(low) as low,
-            last(close) as close,
-            sum(volume) as volume
-        FROM candles_1min
-        WHERE symbol = ? 
-          AND timestamp <= ?
-          AND timestamp > ? - INTERVAL '7 days'
-        GROUP BY 1
-        ORDER BY ts DESC 
-        LIMIT 60
-    """
+    # 2. Intraday 15-min Aggregation (Declarative Placeholder)
+    # Actual query constructed below based on resolution
+    pass
 
     # 3. Today's 5-min Candles (Aggregated from 1min)
     today_5min_query = """
@@ -251,8 +237,11 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
         ORDER BY ts ASC
     """
     
-    # 4. Today's 15-min Candles (Aggregated from 1min)
-    today_15min_query = """
+    # Determine source table
+    table_name = "candles_5min" if resolution == '5' else "candles_1min"
+    
+    # 2. Intraday 15-min Aggregation (Last 14 candles)
+    intraday_15min_query = f"""
         SELECT 
             time_bucket(INTERVAL '15 minutes', timestamp) AS ts,
             first(open) as open,
@@ -260,7 +249,40 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
             min(low) as low,
             last(close) as close,
             sum(volume) as volume
-        FROM candles_1min 
+        FROM {table_name}
+        WHERE symbol = ? AND timestamp <= ?
+        GROUP BY 1
+        ORDER BY ts DESC
+        LIMIT 60
+    """
+    
+    # 3. Today's 5-min Candles (Raw)
+    today_5min_query = f"""
+        SELECT 
+            time_bucket(INTERVAL '5 minutes', timestamp) AS ts,
+            first(open) as open,
+            max(high) as high,
+            min(low) as low,
+            last(close) as close,
+            sum(volume) as volume
+        FROM {table_name}
+        WHERE symbol = ? 
+          AND DATE(timestamp) = DATE(CAST(? AS TIMESTAMP))
+          AND timestamp <= ?
+        GROUP BY 1
+        ORDER BY ts ASC
+    """
+    
+    # 4. Today's 15-min Candles (Aggregated)
+    today_15min_query = f"""
+        SELECT 
+            time_bucket(INTERVAL '15 minutes', timestamp) AS ts,
+            first(open) as open,
+            max(high) as high,
+            min(low) as low,
+            last(close) as close,
+            sum(volume) as volume
+        FROM {table_name} 
         WHERE symbol = ? 
           AND DATE(timestamp) = DATE(CAST(? AS TIMESTAMP))
           AND timestamp <= ?
@@ -271,7 +293,7 @@ def fetch_context_data(timestamp, symbol="BANKNIFTY"):
     try:
         daily_rows = conn.execute(daily_query, (symbol, ts_utc, ts_utc)).fetchall()
         # 15min rows needs simple query
-        last_15min_rows = conn.execute(intraday_15min_query, (symbol, ts_utc, ts_utc)).fetchall()
+        last_15min_rows = conn.execute(intraday_15min_query, (symbol, ts_utc)).fetchall()
         # Today 5min
         today_5min_rows = conn.execute(today_5min_query, (symbol, ts_utc, ts_utc)).fetchall()
         # Today 15min (for tactical decisions)

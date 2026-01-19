@@ -1,0 +1,10 @@
+import pandas as pd
+df = pd.read_csv('/app/audits/remr_missed_alpha_BACKTEST_20260119_150947.csv')
+print(f"Total Opps: {len(df)}")
+print(f"TP: {len(df[df.outcome == 'TP'])}")
+print(f"SL: {len(df[df.outcome == 'SL'])}")
+print(f"EOD: {len(df[df.outcome == 'EOD'])}")
+print(f"Missed PnL: {df.pnl.sum():.2f}")
+print(f"Win Rate: {len(df[df.outcome == 'TP']) / len(df) * 100:.1f}%")
+print("\n--- Top 15 Missed REMR ---")
+print(df[['timestamp', 'outcome', 'pnl', 'reason']].head(15).to_string())

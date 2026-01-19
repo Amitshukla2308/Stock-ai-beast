@@ -422,11 +422,12 @@ class HotPathExecutor:
                 rr = tgt_dist / sl_dist
                 potential_profit = tgt_dist * 27.5 # Nifty Lot Size approx
                 
-                if rr < MIN_R_MULTIPLE:
+                # Buffer for floating point precision: allow 1.75 instead of hard 1.80
+                if rr < (MIN_R_MULTIPLE - 0.05):
                     print(f"      ⛔ RISK GUARD: R:R {rr:.2f} < {MIN_R_MULTIPLE} → BLOCKED")
                     instructions['action'] = "HOLD"
                     instructions['engine_decision'] = "BLOCKED"
-                    instructions['engine_reason'] = f"Low R:R ({rr:.1f})"
+                    instructions['engine_reason'] = f"Low R:R ({rr:.2f})"
                     return
                 
                 # GUARDRAIL 2: Economic Floor

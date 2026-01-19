@@ -845,115 +845,19 @@ class LLMClient:
                      data['action'] = "HOLD"
                      data['engine_decision'] = "BLOCKED"
             
-            # 1. ORE Gate
-            if sel_style == "OPENING_RANGE_EXPANSION" or data.get('mode') == "DISCOVERY":
-                if ter < 0.50:
-                    logger.warning(f"      [ENGINE] 🛑 ORE BLOCKED: Low Trend Efficiency ({ter:.2f} < 0.50).")
-                    data['action'] = "HOLD"
-                    data['reason'] = f"ORE Blocked: Trend Efficiency too low ({ter:.2f})"
-                    data['engine_decision'] = "BLOCKED"
-            
-            # 2. ITC Gate (Dual-Path)
-            if sel_style in ["INTRADAY_TREND_CONTINUATION", "ITC"]:
-                # Path A: Standard Trend
-                path_a_ok = (ter >= 0.55)
-                
-                # Path B: Trend Grind (Slow directional drift)
-                # Allow ITC when: TER >= 0.25 AND DirectionalProgress == True AND (implicit VolContraction in is_grind)
-                path_b_ok = (is_grind and ter >= 0.25 and directional_progress)
-                
-                if not (path_a_ok or path_b_ok):
-                    logger.warning(f"      [ENGINE] 🛑 ITC BLOCKED: Fails Standard (TER {ter:.2f}) and GRIND (Grind={is_grind}, Dir={directional_progress})")
-                    data['action'] = "HOLD"
-                    data['reason'] = f"ITC Blocked: Insufficient Trend Quality or Directionality."
-                    data['engine_decision'] = "BLOCKED"
-                elif path_b_ok:
-                    logger.info(f"      [REGIME] 🐢 TREND_GRIND Active: Allowing ITC with TER {ter:.2f}")
-
-            # 3. Momentum Gate Symmetry (No directional bias, just alignment)
-            # Enforce: CALL allowed only if MomentumSlope > 0, PUT only if < 0
-            m_slope = micro_context.get('momentum_slope', 0)
-            if data['action'] == 'BUY_CALL' and m_slope <= 0:
-                 # Exception: V-Reversal allows fighting momentum
-                 if not micro_context.get('v_reversal'):
-                      logger.warning(f"      [ENGINE] 🛑 MOMENTUM SYMETRY BLOCK: CALL requires Positive Slope (Got {m_slope}).")
-                      data['action'] = 'HOLD'
-                      data['reason'] = "Momentum Mismatch: CALL requires positive momentum."
-            elif data['action'] == 'BUY_PUT' and m_slope >= 0:
-                 if not micro_context.get('v_reversal'):
-                      logger.warning(f"      [ENGINE] 🛑 MOMENTUM SYMETRY BLOCK: PUT requires Negative Slope (Got {m_slope}).")
-                      data['action'] = 'HOLD'
-                      data['reason'] = "Momentum Mismatch: PUT requires negative momentum."
-
-            # 4. Conflict Resolver Priority
-            # Structure > Velocity > Time
-            structural_break = micro_context.get('structural_break', False)
+            # --- MARKET PRIMITIVES (AUTHORITATIVE) ---
             impulse_detected = micro_context.get('impulse_detected', False)
-            expand_vol = 'EXPANDING' in micro_context.get('volume_behavior', 'NORMAL')
+            is_expanding_vol = 'EXPANDING' in micro_context.get('volume_behavior', 'NORMAL')
+            structural_break = micro_context.get('structural_break', False)
+            break_dir = micro_context.get('break_direction', 'NEUTRAL')
+            ter = micro_context.get('trend_efficiency', 0.0)
+            is_grind = micro_context.get('is_grind', False)
+            directional_progress = micro_context.get('directional_progress', False) # Inherited from earlier or re-calc
             
-            # Acceptance Reform: Impulse OR ExpandVol OR Grind
-            acceptance = impulse_detected or expand_vol or (is_grind and directional_progress)
+            # Acceptance Primitive
+            acceptance = impulse_detected or is_expanding_vol or (is_grind and directional_progress)
             
-            if structural_break and acceptance:
-                 logger.info("      [CONFLICT] ⚔️ STRUCTURE PRIORITY: Skipping Time/Velocity Gates.")
-                 # Soften Time Gates (Cooling)
-                 # Note: Cooling logic was skipped above (pass), logic is handled here or implicitly by not checking it again.
-                 
-                 # TER / NetProgress violations handled by ITC Path B logic above.
-                 # Counter-trend checks remain naturally as strictly enforced by Trend Acceptance logic below.
-            
-            # 6. CONDITIONAL COOLING (10:00-10:30)
-            # If we are in cooling period AND NOT Structure Priority
-            if "10:00" <= current_time_str <= "10:30":
-                 # Only block if we don't have Structure + Acceptance
-                 if not (structural_break and acceptance):
-                      # Check simple expansion as fallback?
-                      velocity_inc = micro_context.get('velocity_increasing', False)
-                      if not velocity_inc:
-                           data['action'] = "HOLD"
-                           data['engine_decision'] = "BLOCKED"
-                           data['reason'] = "Market Cooling Period (10:00-10:30) - No Structure/Expansion"
-
-            # --- ENTRY (CALCULATION) ---
-            close_price = tick.get('close', float(data.get('entry') or 0) or 0)
-            entry = float(data.get('entry') or 0)
-            if entry == 0: entry = float(close_price)
-            data['entry'] = entry
-            
-            # --- STRUCTURE LOGGING TAGS ---
-            regime = micro_context.get('trend_regime', 'ROTATION')
-            np_raw = micro_context.get('net_progress_3', 0.0)
-            logger.info(f"      [REGIME] {regime} | [DIR] {'OK' if directional_progress else 'MISMATCH'} | [STRENGTH] {abs(np_raw):.1f} | [ACCEPT] {'YES' if acceptance else 'NO'}")
-            
-            return data
-
-            # 2. Confidence Normalization
-            try:
-                conf_val = data.get('confidence', 0)
-                # If LLM failed to provide a valid confidence, use the micro_context pre-computed one as fallback
-                if conf_val is None or not isinstance(conf_val, (int, float)):
-                    conf_val = micro_context.get('confidence', 0.0)
-                
-                f_conf = float(conf_val)
-                if math.isnan(f_conf) or math.isinf(f_conf):
-                    f_conf = 0.0
-                data['confidence'] = max(0.0, min(1.0, f_conf))
-            except:
-                data['confidence'] = 0.0
-
-            # 3. Action Normalization
-            action = data.get('decision', data.get('action', 'HOLD'))
-            data['action'] = action
-            
-            # 4. Reason Normalization (HOLD must have a reason)
-            reason = data.get('reason', data.get('adjustment_reason', ''))
-            if action == 'HOLD' and not reason:
-                reason = "Market not in optimal zone for entry"
-            data['technical_reason'] = reason
-            data['reason'] = reason # Ensure both are set for compatibility
-
-            # --- PHASE-2.5: PHYSICAL REASONABILITY GATING ---
-            
+            # --- PHASE-2.5: REASONABILITY GATING ---
             # Safe ATR access
             raw_atr = context.get('atr_14', context.get('atr', 15))
             try:
@@ -962,20 +866,23 @@ class LLMClient:
                 atr = 15.0
             
             # SL Gating
-            sl = data.get('sl_points', 0)
-            if sl and isinstance(sl, (int, float)) and sl > 4 * atr:
-                old_sl = sl
+            sl_pts_llm = data.get('sl_points', 0)
+            if sl_pts_llm and isinstance(sl_pts_llm, (int, float)) and sl_pts_llm > 4 * atr:
+                old_sl = sl_pts_llm
                 data['sl_points'] = round(1.5 * atr)
                 logger.warning(f"      🚨 LLM Hallucinated Massive SL: {old_sl} | Capped to {data['sl_points']} (1.5x ATR)")
                 data['reason'] = f"(SL Capped) {data.get('reason', '')}"
 
             # Target Gating
-            tgt = data.get('target_points', 0)
-            if tgt and isinstance(tgt, (int, float)) and tgt > 15 * atr: # Target can be larger, but not infinite
-                old_tgt = tgt
+            tgt_pts_llm = data.get('target_points', 0)
+            if tgt_pts_llm and isinstance(tgt_pts_llm, (int, float)) and tgt_pts_llm > 15 * atr:
+                old_tgt = tgt_pts_llm
                 data['target_points'] = round(3 * atr)
                 logger.warning(f"      🚨 LLM Hallucinated Massive Target: {old_tgt} | Capped to {data['target_points']} (3x ATR)")
                 data['reason'] = f"(Target Capped) {data.get('reason', '')}"
+
+
+
 
             # --- PHASE-2.5: INJECT MICRO-CONTEXT FOR GUARDS & LOGIC ---
             data['micro_context'] = {
@@ -1232,9 +1139,24 @@ class LLMClient:
             if 'BUY_CALL' in action:
                 sl_price = entry - sl_points if sl_points > 0 else 0
                 tgt_price = entry + tgt_points if tgt_points > 0 else 0
+                
+                # --- STRUCTURAL TARGET GUARD (REINSTATE) ---
+                if resistance and isinstance(resistance, (int, float)) and resistance > entry:
+                    if tgt_price > resistance:
+                        logger.warning(f"      🛡️ [GUARD] Target Capped at Resistance: {tgt_price:.1f} -> {resistance:.1f}")
+                        tgt_price = resistance
+                        tgt_points = abs(tgt_price - entry)
+                        
             elif 'BUY_PUT' in action:
                 sl_price = entry + sl_points if sl_points > 0 else 0
                 tgt_price = entry - tgt_points if tgt_points > 0 else 0
+                
+                # --- STRUCTURAL TARGET GUARD (REINSTATE) ---
+                if support and isinstance(support, (int, float)) and support < entry:
+                    if tgt_price < support:
+                        logger.warning(f"      🛡️ [GUARD] Target Capped at Support: {tgt_price:.1f} -> {support:.1f}")
+                        tgt_price = support
+                        tgt_points = abs(tgt_price - entry)
             
             # Store Final Prices
             data['sl'] = round(sl_price, 2)
@@ -1472,17 +1394,23 @@ class LLMClient:
                  is_grind = micro_context.get('is_grind', False)
                  
                  # Break Logic (Is the break supported by momentum?)
-                 break_aligned_momentum = False
-                 if break_dir == 'BULLISH' and dir_sign == 1: break_aligned_momentum = True
-                 if break_dir == 'BEARISH' and dir_sign == -1: break_aligned_momentum = True
+                 net_prog_3 = micro_context.get('net_progress_3', 0.0) # Define net_prog_3 here
+                 
+                 # Break Aligned Momentum check
+                 break_aligned_momentum = (break_dir == 'BULLISH' and net_prog_3 > 0) or (break_dir == 'BEARISH' and net_prog_3 < 0)
                  
                  # Energy Gate: Impulse OR Expansion OR (Grind + Aligned)
                  has_energy = (impulse_detected and break_aligned_momentum) or is_expanding_vol or (is_grind and break_aligned_momentum)
                  
-                 # Dynamic Confidence Floor (Symmetric)
-                 # Lower bar for PROVEN grinds/impulses. Higher bar for generic signals.
+                 # Dynamic Confidence Floor (Symmetric - Phase 2.8 Optimized)
+                 # Lower bar for PROVEN grinds/impulses/trends. Higher bar for generic signals.
+                 is_trend_or_impulse = is_grind or impulse_detected or is_expanding_vol
+                 
                  if v_reversal:
                       high_conf_floor = 0.45 
+                 elif is_trend_or_impulse:
+                      # Phase 2.8: Adaptive confidence in clear direction
+                      high_conf_floor = 0.38
                  elif is_grind and break_aligned_momentum:
                       high_conf_floor = 0.50
                  elif break_aligned_momentum and has_energy:
@@ -1492,6 +1420,34 @@ class LLMClient:
                  
                  high_conf_passed = data.get('confidence', 0) >= high_conf_floor
                  
+                 # Acceptable Pullback Check (Phase 2.8 Dynamic)
+                 retracement_depth = micro_context.get('retracement_depth', 'UNCERTAIN')
+                 m_slope = micro_context.get('momentum_slope', 0.0)
+                 
+                 # Phase 2.8: In strong momentum, allow deeper retrace (recovering structural alpha)
+                 is_strong_momentum = is_trend_or_impulse and m_slope > 0.4
+                 
+                 if is_strong_momentum:
+                      # Phase 2.8: Allow DEEP pullbacks in strong trends
+                      acceptable_pullback = retracement_depth in ['SHALLOW', 'NORMAL', 'DEEP', 'UNCERTAIN']
+                 else:
+                      acceptable_pullback = retracement_depth in ['SHALLOW', 'NORMAL', 'UNCERTAIN']
+                 
+                 # Phase 2.8: Late Session Momentum Exception (14:30-14:50)
+                 # Allow only if target is feasible and regime is trending
+                 if "14:30" <= current_time_str <= "14:50":
+                      tgt_dist = abs(data['target'] - close)
+                      eff_atr = micro_context.get('effective_atr', 100)
+                      feasibility_ok = tgt_dist <= 1.5 * eff_atr
+                      
+                      if not (is_trend_or_impulse and feasibility_ok):
+                           trend_acceptance_confirmed = False # Block if not strong or target too far
+                           data['engine_decision'] = "BLOCKED"
+                           data['engine_reason'] = "Late Session Wall: Target too far or no Trend"
+                           logger.warning(f"      [ENGINE] 🛑 LATE SESSION BLOCKED: Trend={is_trend_or_impulse}, TgtDist={tgt_dist:.1f} > 1.5*ATR")
+                      else:
+                           logger.warning(f"      [ENGINE] 🎯 LATE SESSION MOMENTUM: Allowing trade @ {current_time_str}")
+
                  if has_energy:
                       trend_acceptance_confirmed = True
                       logger.warning(f"      [ENGINE] ✅ TREND ACCEPTANCE (ENERGY): Dir={break_dir}, Strength={dir_strength:.1f}, Impulse={impulse_detected}")
@@ -1516,11 +1472,26 @@ class LLMClient:
             if ter > 0.7: objective_score += 30
             elif ter > 0.5: objective_score += 15
             
-            # 2. Energy & Alignment
-            # Recalculate aligned momentum for current action (not just break dir)
-            # We already have action_aligned computed earlier
-            if action_aligned and has_energy: objective_score += 30
-            elif action_aligned: objective_score += 10
+            # 1.5 Progress Bonus (Phase 2.7e)
+            # Award points for displacement even if TER is low
+            net_prog = abs(micro_context.get('net_progress_3', 0))
+            if net_prog > 1.0 * eff_atr: objective_score += 10
+            elif net_prog > 0.5 * eff_atr: objective_score += 5
+            
+            # 2. Energy & Alignment (Refined for Sniper)
+            # We want to award points if the BREAK is aligned with physics,
+            # even if the LLM is hesitant (HOLD).
+            potential_action = action
+            if potential_action == 'HOLD' and structural_break:
+                 potential_action = 'BUY_CALL' if break_dir == 'BULLISH' else 'BUY_PUT'
+            
+            # Re-check alignment for objective score based on potential action
+            p_aligned = False
+            if potential_action == 'BUY_CALL' and m_slope > 0: p_aligned = True
+            elif potential_action == 'BUY_PUT' and m_slope < 0: p_aligned = True
+            
+            if p_aligned and has_energy: objective_score += 30
+            elif p_aligned: objective_score += 10
             
             # 3. Structure
             if structural_break and trend_acceptance_confirmed: objective_score += 20
@@ -1536,11 +1507,15 @@ class LLMClient:
                  if current_conf < 0.80:
                       logger.warning(f"      [AUTHORITY] ⚖️  Metric Override: Boosting Conf {current_conf:.2f} -> 0.80 (Score: {objective_score})")
                       data['confidence'] = 0.80
-            elif objective_score <= 20:
+            elif objective_score <= 10: # Softened threshold (was 20/15)
                  # Low Quality Setup -> Cap confidence
-                 if current_conf > 0.40:
-                      logger.warning(f"      [AUTHORITY] ⚖️  Metric Override: Capping Conf {current_conf:.2f} -> 0.40 (Score: {objective_score})")
-                      data['confidence'] = 0.40
+                 if current_conf > 0.45:
+                      logger.warning(f"      [AUTHORITY] ⚖️  Metric Override: Capping Conf {current_conf:.2f} -> 0.45 (Score: {objective_score})")
+                      data['confidence'] = 0.45
+            else:
+                 # In-between zones (11-74): TRUST THE LLM's raw confidence.
+                 # This resolves the "fighting" and restores agency to the brain.
+                 pass
 
             # 5. REGIME DIRECTION AUTHORITY (Phase-2.5)
             # Lock Direction to Regime Direction. No counter-trading trend unless explicitly marked.
@@ -1550,7 +1525,7 @@ class LLMClient:
                 # Actually, structural_break_state is authoritative for direction
                 
                 auth_dir = self.structural_break_state
-                if auth_dir:
+                if auth_dir and sel_style != 'REMR':
                     if auth_dir == 'BULLISH' and action == 'BUY_PUT' and not v_reversal:
                         logger.warning(f"      [ENGINE] 🛑 REGIME AUTHORITY: BUY_PUT Blocked in BULLISH {active_regime}")
                         data['action'] = 'HOLD'
@@ -1565,17 +1540,22 @@ class LLMClient:
             # --- FINAL GATE: MOMENTUM ALIGNMENT (SYMMETRIC) ---
             # Section 3.D/Synergy fix: Even if structure is accepted, block if momentum is sharks-opposite
             # This prevents entering a gap-up that is actively dropping (01-12 scenario)
+            # BYPASS for REMR: REMR is a fade style.
             m_slope = micro_context.get('momentum_slope', 0)
-            if action == 'BUY_CALL' and m_slope < -2 and not v_reversal:
+            if action == 'BUY_CALL' and m_slope < -2 and not v_reversal and sel_style != 'REMR':
                  logger.warning(f"      [ENGINE] 🛑 MOMENTUM GATE: CALL blocked vs negative slope ({m_slope}).")
                  trend_acceptance_confirmed = False
                  if not open_position: # Only block new entry, don't exit if already in
                       data['action'] = "HOLD"
-            elif action == 'BUY_PUT' and m_slope > 2:
+            elif action == 'BUY_PUT' and m_slope > 2 and not v_reversal and sel_style != 'REMR':
                  logger.warning(f"      [ENGINE] 🛑 MOMENTUM GATE: PUT blocked vs positive slope ({m_slope}).")
                  trend_acceptance_confirmed = False
                  if not open_position:
                       data['action'] = "HOLD"
+
+            # Phase 2.8: Authoritative Baseline Context
+            atr_val = data.get('atr', 50)
+            selected_style = data.get('selected_style', '')
 
             # 4. DIRECTIONAL CONSISTENCY CHECK
             # Override only if sign(ProgressSinceOpen) == sign(BreakDirection)
@@ -1611,7 +1591,7 @@ class LLMClient:
                       # Boost confidence for recovery attempts
                       data['confidence'] = max(data.get('confidence', 0), 0.85)
 
-            # 6. CONDITIONAL COOLING (Expansion Override)
+            # 6. CONDITIONAL COOLING (Expansion + Volatility Override)
             is_cooling = False
             if "10:00" <= current_time_str <= "10:30":
                  velocity_inc = data.get('micro_context', {}).get('velocity_increasing', False)
@@ -1619,8 +1599,17 @@ class LLMClient:
                  or_range_val = em_envelope.get('or_range', 50)
                  range_expanding = day_range > 1.2 * or_range_val
                  
+                 # Phase 2.8: Volatility-Conditioned Cooling
+                 eff_atr = micro_context.get('effective_atr', 50)
+                 vbd_val = data.get('atr', 50) # Raw ATR or baseline? In this scope atr is baseline context
+                 # Let's use micro_context.eff_atr vs baseline atr
+                 vol_expansion = eff_atr > 2.0 * atr_val
+                 
                  if velocity_inc or (structural_break and trend_acceptance_confirmed) or range_expanding:
                       logger.warning(f"      🔥 COOLING SKIPPED (Expansion): VelInc={velocity_inc}, TrendAccept={trend_acceptance_confirmed}")
+                      is_cooling = False
+                 elif vol_expansion and selected_style == "VOLATILITY_BREAK":
+                      logger.warning(f"      🔥 COOLING SKIPPED (Volatility): ATR Exp ({eff_atr:.1f} > 2*{atr_val:.1f}). Allowing VBD.")
                       is_cooling = False
                  else:
                       is_cooling = True
@@ -1637,9 +1626,8 @@ class LLMClient:
             # 4. action == HOLD (LLM is conservative)
             # 5. Not already in position
             
+            # (atr_val and selected_style moved higher for Ph2.8 scope)
             required_conf = 0.70
-            selected_style = data.get('selected_style', '')
-            atr_val = data.get('atr', 50)
             
             # Qualified Trend Entry
             qualified_trend_entry = (
@@ -1650,11 +1638,14 @@ class LLMClient:
                  open_position is None
             )
             
+            # --- SNIPER 2.0: DISCIPLINED TREND ENTRY (REFINED) ---
+            # Re-implement forced entry ONLY if math is UNDENIABLE (Score >= 55)
+            # Lowered slightly from 60 to 55 to capture Jan 9th correctly
             if qualified_trend_entry:
                  current_conf = float(data.get('confidence', 0))
                  
-                 # Lowered threshold for confirmed trends
-                 if current_conf >= 0.25 or is_opportunity_recovery:
+                 # SNIPER 2.0: Only override LLM's HOLD if setup is extremely high quality
+                 if objective_score >= 55:
                       # HARD GEOMETRY SWITCH: Use ITC geometry, NOT REMR
                       data['selected_style'] = 'INTRADAY_TREND_CONTINUATION'
                       data['confidence'] = 0.75
@@ -1669,15 +1660,17 @@ class LLMClient:
                            data['sl'] = round(close + 50, 2)
                            data['target'] = round(close - 90, 2)
                       
-                      data['reason'] = f"(Confirmed Trend: {break_dir}, Acceptance ✓) {data['reason']}"
-                      logger.warning(f"      [ENGINE] 💥 DISCIPLINED TREND ENTRY: {data['action']} @ {close} (ITC Geometry: SL={data['sl']}, TGT={data['target']})")
-            
-            # If Opportunity Recovery but NO qualified trend, just boost confidence for LLM's signal
-            elif is_opportunity_recovery and data['action'] != 'HOLD':
+                      data['reason'] = f"(Sniper 2.0: Score {objective_score} ✓) {data.get('reason','')}"
+                      logger.warning(f"      [ENGINE] 🎯 SNIPER 2.0: Forced {data['action']} @ {close} (Technical Score Undeniable: {objective_score})")
+                 else:
+                      logger.info(f"      [ENGINE] 🕊️  Sniper Declined: Score {objective_score} < 55. Respecting LLM's HOLD.")
+
+            # 5. OPPORTUNITY RECOVERY BOOST
+            if is_opportunity_recovery and data['action'] != 'HOLD':
                  current_conf = float(data.get('confidence', 0))
                  if current_conf >= 0.40 and current_conf < 0.8:
                       data['confidence'] = 0.85
-                      data['reason'] = f"(Opp. Recovery Boost) {data['reason']}"
+                      data['reason'] = f"(Opp. Recovery Boost) {data.get('reason','')}"
                       logger.warning(f"      [ENGINE] 🚀 CONFIDENCE BOOSTED for Opportunity Recovery: {current_conf} -> 0.85")
 
             
@@ -1706,8 +1699,13 @@ class LLMClient:
                 # Use local micro_context (Authoritative)
                 vol_behavior = micro_context.get('volume_behavior', 'NORMAL')
                 
-                if realized_move > 1.2 * em_high and 'CONTRACTING' in vol_behavior:
-                    logger.warning(f"      [ENGINE] 🛑 TREND EXHAUSTED: Move={realized_move:.0f} > 1.2*EM ({em_high:.0f}) + Vol Contraction.")
+                # Dampen exhaustion for Sniper-authorized trades (Allow 2.5x EM instead of 1.2x)
+                # Reason: Sniper identifies undenied structural energy that can exceed standard EM.
+                current_reason = data.get('reason', '')
+                exhaustion_threshold = 2.5 if "Sniper" in current_reason else 1.2
+                
+                if realized_move > exhaustion_threshold * em_high and 'CONTRACTING' in vol_behavior:
+                    logger.warning(f"      [ENGINE] 🛑 TREND EXHAUSTED: Move={realized_move:.0f} > {exhaustion_threshold}*EM ({em_high:.0f}) + Vol Contraction.")
                     data['action'] = "HOLD"
                     data['reason'] = f"Trend Exhaustion Gate: Realized move ({realized_move:.0f}) exceeded 1.2*EM and volume is contracting."
                     data['engine_decision'] = "BLOCKED"
