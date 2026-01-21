@@ -2,8 +2,13 @@ import time
 from datetime import datetime, timedelta
 import pandas as pd
 from brokers.fyers.connector import get_fyers_model
+from engine.auth_fyers import trigger_login_flow
 from data.database import get_connection, init_db
 import argparse
+import pytz
+
+IST = pytz.timezone('Asia/Kolkata')
+UTC = pytz.utc
 
 def fetch_history(fyers, symbol, start_date, end_date, resolution="5"):
     """
@@ -117,7 +122,7 @@ SYMBOL_MAP = {
     "FINNIFTY": "NSE:FINNIFTY-INDEX"
 }
 
-def run(days=5, symbol="BANKNIFTY", resolution="5", start_date=None, end_date=None):
+def run(days=5, symbol="NIFTY", resolution="5", start_date=None, end_date=None):
     # Ensure tables exist with correct schema
     init_db()
     
@@ -144,27 +149,31 @@ def run(days=5, symbol="BANKNIFTY", resolution="5", start_date=None, end_date=No
 def ensure_data_v2(symbol, days=5, resolution="5", table_name="candles_5min", start_date=None, end_date=None):
     """
     Version 2 of ensure_data that accepts table_name and explicit dates.
+    Standardizes on UTC storage.
     """
-    try:
-        fyers = get_fyers_model()
-    except Exception as e:
-        print(f"❌ Could not connect to Fyers: {e}")
-        return
-
     conn = get_connection()
     
+    now_ist = datetime.now(IST)
+    
     if start_date and end_date:
-        # Use explicit range with padding
+        # User provides date - usually intended as IST
+        if start_date.tzinfo is None: start_date = IST.localize(start_date)
+        if end_date.tzinfo is None: end_date = IST.localize(end_date)
+        
         padding = timedelta(days=7)
         effective_start = start_date - padding
         effective_end = end_date
         print(f"📥 Prefilling {symbol} ({resolution}m) into {table_name} (Range: {effective_start.date()} to {effective_end.date()})...")
     else:
         # Fallback to last N days
-        effective_end = datetime.now()
+        effective_end = now_ist
         effective_start = effective_end - timedelta(days=days)
         print(f"📥 Prefilling {symbol} ({resolution}m) into {table_name} (Last {days} days)...")
     
+    # DB CONVERSION: Standardize filters to UTC for SQL comparison
+    eff_start_utc = effective_start.astimezone(UTC).replace(tzinfo=None)
+    eff_end_utc = effective_end.astimezone(UTC).replace(tzinfo=None)
+
     # Calculate actual days for threshold
     diff_days = (effective_end - effective_start).days
     if diff_days < 1: diff_days = 1
@@ -174,7 +183,7 @@ def ensure_data_v2(symbol, days=5, resolution="5", table_name="candles_5min", st
     expected_min = diff_days * (ticks_per_day * 0.7) # 70% threshold
     
     count_query = f"SELECT count(*) FROM {table_name} WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?"
-    initial_count = conn.execute(count_query, (symbol, effective_start, effective_end)).fetchone()[0]
+    initial_count = conn.execute(count_query, (symbol, eff_start_utc, eff_end_utc)).fetchone()[0]
     
     if initial_count >= expected_min:
         print(f"   ✨ {symbol}: Already has {initial_count} candles in range. Skipping.")
@@ -182,86 +191,94 @@ def ensure_data_v2(symbol, days=5, resolution="5", table_name="candles_5min", st
         return
 
     # Fetch in 1-day chunks for 1-minute data 
-    # --- SMART GAP FILL (SYNC FROM GAP) ---
-    # 1. Get existing dates in DB
-    existing_dates_query = f"SELECT DISTINCT strftime('%Y-%m-%d', timestamp) FROM {table_name} WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?"
-    existing_dates_res = conn.execute(existing_dates_query, (symbol, effective_start, effective_end)).fetchall()
-    existing_dates = set(r[0] for r in existing_dates_res)
+    # 1. Check if we have any data at all for this symbol in the range
+    check_query = f"SELECT EXISTS(SELECT 1 FROM {table_name} WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?)"
+    has_any = conn.execute(check_query, (symbol, eff_start_utc, eff_end_utc)).fetchone()[0]
     
-    # 2. Find the FIRST missing day (or Today) to start sync from
-    sync_start_date = None
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    
-    current_day = effective_start
-    while current_day.date() <= effective_end.date():
-        day_str = current_day.strftime('%Y-%m-%d')
+    if not has_any:
+        print(f"      🔎 No data found for {symbol} in range. Full sync required.")
+        sync_start_date = effective_start
+    else:
+        # Optimized: Get the latest timestamp to see how much we need to fill
+        max_ts_query = f"SELECT MAX(timestamp) FROM {table_name} WHERE symbol = ? AND timestamp <= ?"
+        latest_ts_str = conn.execute(max_ts_query, (symbol, eff_end_utc)).fetchone()[0]
         
-        # Condition A: Day is completely missing
-        if day_str not in existing_dates:
-            print(f"      🔎 Found Gap at {day_str}. Syncing from here...")
-            sync_start_date = current_day
-            break
-            
-        # Condition B: Day is present, but it is TODAY (Likely partial data, need update)
-        if day_str == today_str:
-             print(f"      🔎 updating Today ({day_str}) for latest data...")
-             sync_start_date = current_day
-             break
+        if latest_ts_str:
+            latest_ts = datetime.fromisoformat(latest_ts_str).replace(tzinfo=UTC).astimezone(IST)
+            # If the latest data is older than the target end date (by more than 1 day), sync from there
+            if latest_ts < (effective_end - timedelta(days=1)):
+                print(f"      🔎 Latest data for {symbol} is {latest_ts.date()}. Syncing from there...")
+                sync_start_date = latest_ts
+            else:
+                # Still check for Today to get latest partial data
+                today_str = now_ist.strftime('%Y-%m-%d')
+                if latest_ts.strftime('%Y-%m-%d') == today_str:
+                     print(f"      🔎 Updating Today ({today_str}) for latest data...")
+                     sync_start_date = latest_ts
+                else:
+                     print(f"      ✨ {symbol} appears up to date (Latest: {latest_ts.date()}).")
+                     sync_start_date = None
+        else:
+            sync_start_date = effective_start
         
-        current_day += timedelta(days=1)
-        
+    total_added = 0
     # 3. Fetch from sync_start_date to effective_end (if sync needed)
     if sync_start_date:
+        # LAZY CONNECTION: Only connect to Fyers if we actually need to sync
+        try:
+            fyers = get_fyers_model()
+        except Exception as e:
+            if "No valid Fyers token" in str(e) or "No valid token" in str(e):
+                trigger_login_flow(reason="Prefill requires fresh data")
+            else:
+                print(f"❌ Could not connect to Fyers: {e}")
+            conn.close()
+            return
+
         print(f"      📥 Fetching range: {sync_start_date.date()} ➡ {effective_end.date()} ...")
         
         # --- CHUNKED FETCHING IMPLEMENTATION ---
-        # Fyers Limit: 100 days for intraday. We use 90 to be safe.
-        # For Daily (1D), limit is 366 days. We use 360.
         chunk_days = 90
         if resolution == "1D" or resolution == "D":
             chunk_days = 360
             
         current_chunk_start = sync_start_date
-        total_added = 0
         
         while current_chunk_start < effective_end:
-            # Calculate chunk end (min of chunk size or overall end)
             current_chunk_end = min(current_chunk_start + timedelta(days=chunk_days), effective_end)
             
-            # print(f"         Fetching chunk: {current_chunk_start.date()} -> {current_chunk_end.date()}") # Debug
-            
-            candles = fetch_history(fyers, symbol, current_chunk_start, current_chunk_end, resolution)
-            
-            if candles:
-                df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['symbol'] = symbol
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+            try:
+                candles = fetch_history(fyers, symbol, current_chunk_start, current_chunk_end, resolution)
                 
-                rows_to_insert = []
-                for _, row in df.iterrows():
-                    rows_to_insert.append((
-                        row['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), 
-                        row['symbol'], 
-                        row['open'], row['high'], row['low'], row['close'], row['volume']
-                    ))
+                if candles:
+                    df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df['symbol'] = symbol
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                    
+                    rows_to_insert = []
+                    for _, row in df.iterrows():
+                        rows_to_insert.append((
+                            row['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), 
+                            row['symbol'], 
+                            row['open'], row['high'], row['low'], row['close'], row['volume']
+                        ))
 
-                try:
                     conn.executemany(f"INSERT OR IGNORE INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?)", rows_to_insert)
                     total_added += len(rows_to_insert)
-                except Exception as e:
-                    print(f"   ⚠️ Insert Error: {e}")
+                    conn.commit() # Commit after every chunk to release locks
+                    
+            except Exception as e:
+                print(f"   ⚠️ Chunk Error ({current_chunk_start.date()}): {e}")
             
-            # Move to next chunk (ensure no overlap or gap? Fyers range_to is inclusive usually, but let's just add 1 sec or strict days)
-            # Fyers history API usually handles dates. 
-            # If we requested 2023-01-01 to 2023-01-30, next should be 2023-01-31
             current_chunk_start = current_chunk_end + timedelta(days=1)
-            time.sleep(0.1) # Rate limit politeness
+            time.sleep(0.1) 
             
     else:
         print(f"      ✨ All data present and up-to-date. Skipping.") 
     
     if total_added > 0:
         print(f"   ✅ {symbol}: Added {total_added} new candles.")
+        conn.commit()
     else:
         print(f"   ✨ {symbol}: Database is up to date.")
         
@@ -270,7 +287,7 @@ def ensure_data_v2(symbol, days=5, resolution="5", table_name="candles_5min", st
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=5, help="Number of days to ensure")
-    parser.add_argument("--symbol", type=str, default="BANKNIFTY", help="Symbol to prefill")
+    parser.add_argument("--symbol", type=str, default="NIFTY", help="Symbol to prefill")
     parser.add_argument("--res", type=str, default="5", help="Resolution (1 or 5)")
     args = parser.parse_args()
     

@@ -24,10 +24,10 @@ services:
       - VLLM_API_BASE=http://ai_core_ollama:11434/v1
       - BRAIN_API_BASE=http://ai_core_ollama:11434/v1
       - BRAIN_API_KEY=ollama
-      - BRAIN_MODEL_NAME=nemotron-30b
+      - BRAIN_MODEL_NAME=nemotron-30b-trading:latest
       - WORKER_API_BASE=http://ai_core_ollama:11434/v1
       - WORKER_API_KEY=ollama
-      - WORKER_MODEL_NAME=nemotron-30b
+      - WORKER_MODEL_NAME=nemotron-30b-trading:latest
       - FYERS_CLIENT_ID=${FYERS_CLIENT_ID}
       - FYERS_SECRET_ID=${FYERS_SECRET_ID}
       - TRADING_MODE=PAPER

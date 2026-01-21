@@ -1,12 +1,11 @@
 import argparse
-from engine.modes.backtest import BacktestMode
-from engine.modes.mock import MockMode
-from engine.modes.live import LiveMode
+
 from datetime import datetime, timedelta
 from engine.auth_fyers import validate_token_file, validate_live_session
 import logging
 import sys
 import os
+from engine.comm import emit_telegram_signal
 
 # Configure Logging (Dual Output)
 # Configure Logging (Dual Output: File=DEBUG, Console=INFO)
@@ -54,6 +53,7 @@ def get_engine(mode, args=None):
     Factory to create the appropriate engine instance.
     """
     if mode == 'backtest':
+        from engine.modes.backtest import BacktestMode
         symbol = args.symbol if args else "NIFTY"
         
         if args and args.start_date:
@@ -84,7 +84,7 @@ def get_engine(mode, args=None):
             else:
                 logging.debug("      ⏭️ Skipping Fyers Token validation for Backtest Mode.")
 
-            print(f"\n<<<TELEGRAM STATUS>>> {{\"msg\": \"⏳ Prefilling Data for {symbol} ({days} days)...\"}} <<<END>>>\n")
+            emit_telegram_signal("STATUS", {"msg": f"⏳ Prefilling Data for {symbol} ({days} days)..."})
             from data.prefill import run as run_prefill
             
             # Smart Resolution Choice: Use 5-min for multi-year, 1-min for short term
@@ -98,12 +98,12 @@ def get_engine(mode, args=None):
                 start_date=start_date,
                 end_date=end_date
             )
-            print(f"\n<<<TELEGRAM STATUS>>> {{\"msg\": \"✅ Data Ready. Starting Simulation...\"}} <<<END>>>\n")
+            emit_telegram_signal("STATUS", {"msg": "✅ Data Ready. Starting Simulation..."})
             
         except Exception as e:
             # Emit Error Status
             err_msg = str(e).replace('"', "'")
-            print(f"\n<<<TELEGRAM STATUS>>> {{\"msg\": \"❌ Prefill Failed: {err_msg}\"}} <<<END>>>\n")
+            emit_telegram_signal("STATUS", {"msg": f"❌ Prefill Failed: {err_msg}"})
             logging.error(f"❌ Critical Prefill Error: {e}")
             raise e # CRITICAL: Stop execution if prefill fails
         
@@ -111,14 +111,16 @@ def get_engine(mode, args=None):
         return BacktestMode(start_date=start_date, end_date=end_date, symbol=symbol, resolution=res, initial_balance=balance, chat_id=args.chat_id)
         
     elif mode == 'mock':
+        from engine.modes.live import LiveMode
         debug = args.debug_schedule if args else False
         symbol = args.symbol if args else "NIFTY"
-        return MockMode(debug_schedule=debug, symbol=symbol, chat_id=args.chat_id)
+        return LiveMode(debug_schedule=debug, symbol=symbol, chat_id=args.chat_id, mock=True)
         
     elif mode == 'live':
+        from engine.modes.live import LiveMode
         debug = args.debug_schedule if args else False
         symbol = args.symbol if args else "NIFTY"
-        return LiveMode(debug_schedule=debug, symbol=symbol, chat_id=args.chat_id)
+        return LiveMode(debug_schedule=debug, symbol=symbol, chat_id=args.chat_id, mock=False)
         
     else:
         raise ValueError(f"Unknown mode: {mode}")
@@ -131,7 +133,7 @@ if __name__ == "__main__":
     parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD)")
     parser.add_argument("--symbol", type=str, default="NIFTY", help="Ticker symbol (e.g. NIFTY, BANKNIFTY)")
     parser.add_argument("--balance", type=int, default=30000, help="Starting balance in rupees")
-    parser.add_argument("--chat-id", type=str, default=None, help="Telegram Chat ID for notifications")
+    parser.add_argument("--chat-id", type=str, default=os.getenv("TELEGRAM_CHAT_ID"), help="Telegram Chat ID for notifications")
     parser.add_argument("--debug-schedule", action="store_true", help="Fast schedule for debugging")
     parser.add_argument("--validate-auth", action="store_true", help="Only validate auth and exit")
     

@@ -1,4 +1,4 @@
-import duckdb
+# Removed legacy duckdb import
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -39,21 +39,23 @@ def compute_features(symbol="NSE:NIFTYBANK-INDEX"):
     
     print("⏳ Loading candles from DB...")
     # Load candles
-    df = conn.execute("SELECT * FROM candles_5min WHERE symbol = ? ORDER BY timestamp", (symbol,)).fetchdf()
+    df = pd.read_sql_query("SELECT * FROM candles_5min WHERE symbol = ? ORDER BY timestamp", conn, params=(symbol,))
     
     if df.empty:
         print("❌ No data found in candles_5min.")
+        conn.close()
         return
 
     print(f"📊 Processing {len(df)} candles...")
 
     # Load VIX data
     print("⏳ Loading VIX data...")
-    df_vix = conn.execute("SELECT timestamp, close as vix_close FROM candles_vix ORDER BY timestamp").fetchdf()
+    df_vix = pd.read_sql_query("SELECT timestamp, close as vix_close FROM candles_vix ORDER BY timestamp", conn)
     
     # Merge VIX
-    # We need to align timestamps. Since VIX might have gaps or slightly different timestamps, we use asof merge or reindex
-    # For simplicity, let's assume specific merge on timestamp
+    # SQLite timestamps are strings, but read_sql_query usually handles it if converted
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df_vix['timestamp'] = pd.to_datetime(df_vix['timestamp'])
     df = pd.merge(df, df_vix, on='timestamp', how='left')
     
     # Fill missing VIX with ffill or mean
@@ -75,15 +77,15 @@ def compute_features(symbol="NSE:NIFTYBANK-INDEX"):
     # Expected: BBU_20_2.0, BBL_20_2.0 or similar
     if bb is not None and not bb.empty:
         # Find columns ending with specific patterns if exact match fails
-        cols = bb.columns.tolist()
-        upper_col = next((c for c in cols if c.startswith('BBU')), None)
-        lower_col = next((c for c in cols if c.startswith('BBL')), None)
+        cols_bb = bb.columns.tolist()
+        upper_col = next((c for c in cols_bb if c.startswith('BBU')), None)
+        lower_col = next((c for c in cols_bb if c.startswith('BBL')), None)
         
         if upper_col and lower_col:
             df['bb_upper'] = bb[upper_col]
             df['bb_lower'] = bb[lower_col]
         else:
-            print(f"⚠️ Warning: Could not find BB columns in {cols}")
+            print(f"⚠️ Warning: Could not find BB columns in {cols_bb}")
             df['bb_upper'] = df['close'] # Fallback
             df['bb_lower'] = df['close']
     else:
@@ -129,20 +131,28 @@ def compute_features(symbol="NSE:NIFTYBANK-INDEX"):
     # Upsert logic is hard in bulk, so we delete and insert for this symbol range or just append
     # For now, simple append with ignore
     # Selecting columns matching schema
-    cols = ['timestamp', 'symbol', 'sma_fast', 'sma_slow', 'trend', 
-            'rsi', 'atr', 'volatility', 'bb_upper', 'bb_lower', 
-            'delta', 'gamma', 'theta', 'vega', 'regime']
+    cols_to_save = ['timestamp', 'symbol', 'sma_fast', 'sma_slow', 'trend', 
+                    'rsi', 'atr', 'volatility', 'bb_upper', 'bb_lower', 
+                    'delta', 'gamma', 'theta', 'vega', 'regime']
     
     # Fill missing columns
     df['trend'] = df.apply(lambda row: 'UP' if row['close'] > row['sma_slow'] else 'DOWN', axis=1)
     
-    insert_data = df[cols]
+    # Ensure timestamp is string for SQLite
+    df['timestamp'] = df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
     
-    # Slow insert per row? Or Register DF?
-    conn.register('temp_features', insert_data)
-    conn.execute("INSERT OR IGNORE INTO features SELECT * FROM temp_features")
-    conn.unregister('temp_features')
+    insert_data = df[cols_to_save]
     
+    # Use pandas to_sql for speed (if table exists)
+    try:
+        insert_data.to_sql('features', conn, if_exists='append', index=False)
+    except Exception as e:
+        print(f"⚠️ to_sql Error: {e}. Falling back to row-by-row.")
+        # Fallback row-by-row
+        for _, row in insert_data.iterrows():
+            conn.execute(f"INSERT OR IGNORE INTO features ({','.join(cols_to_save)}) VALUES ({','.join(['?']*len(cols_to_save))})", tuple(row))
+    
+    conn.commit()
     conn.close()
     print("✅ Feature Engineering Complete.")
 

@@ -16,15 +16,12 @@ PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOTENV_PATH = os.path.join(PROJ_ROOT, ".env")
 
 import sys
+from engine.comm import emit_telegram_signal
 
 # Logging Helper for n8n compatibility
 def log(msg):
     # Print to stderr so stdout is reserved for the Result URL/JSON
     print(msg, file=sys.stderr)
-
-# Load environment variables
-PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DOTENV_PATH = os.path.join(PROJ_ROOT, ".env")
 
 log(f"📂 Project Root: {PROJ_ROOT}")
 
@@ -40,15 +37,65 @@ else:
 
 TOKEN_FILE = os.path.join(PROJ_ROOT, "fyers_token.json")
 
-def get_env_var(name, prompt_msg):
-    val = os.getenv(name)
+def get_env_var(var_name, prompt):
+    """Helper to get env var or prompt user in TTY."""
+    val = os.getenv(var_name)
     if not val:
-        val = input(f"{prompt_msg}: ").strip()
+        if sys.stdin.isatty():
+            val = input(f"{prompt}: ").strip()
+        else:
+            raise ValueError(f"Environment variable {var_name} is missing and session is non-interactive.")
     return val
+
+def trigger_login_flow(reason="Token Expired"):
+    """
+    Emits a special signal for n8n/Telegram to initiate interactive login.
+    Optional: If in a terminal, prompts for immediate interactive login.
+    """
+    log(f"⚠️ LOGIN REQUIRED: {reason}")
+    emit_telegram_signal("LOGIN_REQUIRED", {"reason": reason})
+
+    # Terminal Interactivity
+    if sys.stdin.isatty():
+        print("\n" + "!"*60)
+        print(f"🚨 LOGIN REQUIRED: {reason}")
+        print("!"*60)
+        print("\nIdeally login flow should be triggered in the terminal since we are in an interactive session.")
+        
+        try:
+            choice = input("\n👉 Do you want to initiate an interactive login now? (y/n): ").strip().lower()
+            if choice == 'y':
+                log("\n🔗 Starting interactive login...")
+                # We call authenticate_fyers from within ourselves
+                # This works because authenticate_fyers is top-level in this module
+                token = authenticate_fyers()
+                if token:
+                    print("\n✅ Login Successful! Token updated.")
+                    print("🚀 Please re-run your previous command to continue.")
+                    sys.exit(0)
+                else:
+                    print("\n❌ Login failed. Please try again.")
+            else:
+                print("\nℹ️ Headless mode continued. Check Telegram for login link.")
+        except (EOFError, KeyboardInterrupt):
+            print("\n🚫 Interactivity cancelled.")
+
+def get_token_file_path():
+    """Robust path detection for token file across environments."""
+    paths = [
+        TOKEN_FILE,
+        os.path.join("/app", "fyers_token.json"),
+        "fyers_token.json"
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return TOKEN_FILE
 
 def validate_token_file():
     """Checks if the token file exists and matches the 6 AM freshness rule."""
-    if not os.path.exists(TOKEN_FILE):
+    token_path = get_token_file_path()
+    if not os.path.exists(token_path):
         return None
 
     try:
@@ -209,7 +256,7 @@ def authenticate_fyers(headless_url=None, generate_url_only=False):
         "Content-Type": "application/json"
     }
     
-    resp = requests.post("https://api-t1.fyers.in/api/v3/validate-authcode", json=payload, headers=headers)
+    resp = requests.post("https://api-t1.fyers.in/api/v3/validate-authcode", json=payload, headers=headers, timeout=10)
     
     if resp.status_code != 200:
         print(f"❌ API Error: {resp.text}")
