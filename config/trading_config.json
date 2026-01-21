@@ -1,0 +1,114 @@
+{
+    "_metadata": {
+        "version": "2.8.1-Authoritative",
+        "description": "Trading strategy configuration - ALL rules, thresholds, and policies. NO MAGIC NUMBERS ALLOWED IN CODE.",
+        "last_updated": "2026-01-21"
+    },
+    "GLOBAL": {
+        "ALLOW_ROTATIONAL_EXECUTION": true,
+        "COOLING_PERIOD": [
+            "10:00",
+            "10:15"
+        ],
+        "LATE_SESSION_START": "14:30",
+        "TIME_POLICIES": {
+            "OPENING": {
+                "start": "09:15",
+                "end": "10:30",
+                "time_int_threshold": 1030
+            },
+            "MIDDAY": {
+                "start": "10:30",
+                "end": "14:30",
+                "time_int_threshold": 1430
+            },
+            "LATE": {
+                "start": "14:30",
+                "end": "15:30",
+                "time_int_threshold": 1530
+            },
+            "LATE_SESSION_CONFIDENCE_BOOST": 0.10
+        }
+    },
+    "SIGNALS": {
+        "rejection": {
+            "wick_ratio": 0.60,
+            "body_range_pct": 0.40,
+            "min_range_points": 5.0
+        },
+        "trend": {
+            "ter_threshold_trend": 0.55,
+            "ter_threshold_transition": 0.30,
+            "window_size": 5
+        },
+        "compression": {
+            "range_atr_ratio": 0.50
+        },
+        "stall": {
+            "window_size": 3,
+            "range_atr_ratio": 0.40
+        },
+        "momentum": {
+            "avg1": 408.8,
+            "avg2": 568.2,
+            "avg3": 787.3
+        }
+    },
+    "REMR": {
+        "confidence_floor": 0.40,
+        "near_threshold": {
+            "or_pct": 0.15,
+            "atr_pct": 0.20,
+            "min_points": 5.0
+        },
+        "require_stall": true,
+        "allow_compression_trigger": true,
+        "allow_mid_range": true,
+        "sl_atr_multiplier": 0.8,
+        "target_atr_multiplier": 1.2,
+        "momentum_decay_ter_threshold": 0.40,
+        "strong_trend_ter_threshold": 0.60
+    },
+    "ITC": {
+        "confidence_floor": 0.50,
+        "min_TER": 0.55,
+        "min_net_progress_atr": 0.5,
+        "ter_threshold_grind": 0.25,
+        "sl_atr_multiplier": 1.0,
+        "target_atr_multiplier": 1.8
+    },
+    "ITC_GRIND": {
+        "sl_atr_multiplier": 0.7,
+        "target_atr_multiplier": 1.4
+    },
+    "ORE": {
+        "confidence_floor": 0.55,
+        "sl_atr_multiplier": 0.7,
+        "target_atr_multiplier": 1.5
+    },
+    "VBD": {
+        "confidence_floor": 0.60,
+        "sl_atr_multiplier": 1.0,
+        "target_atr_multiplier": 2.0
+    },
+    "LSRM": {
+        "confidence_floor": 0.70
+    },
+    "RISK_RULES": {
+        "momentum_slope": {
+            "call_requires_positive": true,
+            "put_requires_negative": true,
+            "slope_threshold": -5.0
+        },
+        "countertrend": {
+            "allowed_styles": [
+                "REMR",
+                "VBD"
+            ],
+            "allowed_regimes": [
+                "ROTATION",
+                "RANGE"
+            ]
+        }
+    }
+}
