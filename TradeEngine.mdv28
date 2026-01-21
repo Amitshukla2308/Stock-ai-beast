@@ -1,0 +1,692 @@
+This is the correct moment to design this layer. You’ve reached the point where:
+
+* Signal generation is modular.
+* Tactical calls are happening.
+* Entries exist.
+* **But the system has no memory, no life-cycle, no PnL brain.**
+
+Which means right now you don’t have a trading system.
+You have a *signal generator with amnesia*.
+
+So yes — you need a **first-class Trade & Ledger Layer**. Not a feature. A core subsystem.
+
+I’ll give you this in four parts:
+
+1. What this layer is responsible for (conceptually)
+2. The canonical trade life-cycle (v2.8 ideology)
+3. New modular architecture (files + responsibilities)
+4. Rich data model: what to store, log, and report
+
+No MVP nonsense. This is the “real system” design.
+
+---
+
+# 1. What Is the Trade & Ledger Layer?
+
+This layer answers one question:
+
+> **“What actually happened because of our decisions?”**
+
+Everything else (LLM, eligibility, confidence) is *theory*.
+This layer is **reality**.
+
+It must be the **only authority** for:
+
+* What positions exist
+* What was entered
+* What was exited
+* Why it exited
+* How much money was made/lost
+* What the system currently holds
+* What the day/session looks like
+
+If this layer is weak → your entire backtest is meaningless.
+
+---
+
+# 2. Canonical Trade Life-Cycle (v2.8)
+
+Every trade must follow this exact state machine:
+
+```
+CANDIDATE
+   ↓
+PROPOSED (by executor)
+   ↓
+OPENED (ledger)
+   ↓
+ACTIVE
+   ↓
+┌───────────────┐
+│ EXITED        │ ← (SL / TGT / TIME / INVALIDATION / MANUAL)
+└───────────────┘
+   ↓
+CLOSED
+   ↓
+ARCHIVED (EOD)
+```
+
+Nothing else is allowed.
+
+No “implicit close”.
+No “forgot to log”.
+No “it just disappeared”.
+
+---
+
+# 3. New Modular Architecture (God-Level Clean)
+
+You need a **dedicated subsystem**. Not mixed into backtest.py.
+
+### New Tree
+
+```
+trade/
+│
+├── models.py
+│   Trade, Position, ExitEvent dataclasses
+│
+├── store.py
+│   TradeStore (DB abstraction)
+│
+├── ledger.py
+│   TradeLedger (in-memory truth)
+│
+├── lifecycle.py
+│   State machine logic
+│
+├── exit_engine.py
+│   SL/TGT/Time/Invalidation logic
+│
+├── eod.py
+│   End-of-day close, stats, reports
+│
+└── reporter.py
+    PnL, metrics, daily summary
+```
+
+This entire folder becomes **non-negotiable core**.
+
+Everything else *talks to this*.
+
+---
+
+# 4. Responsibilities by Module
+
+## 4.1 `trade/models.py`
+
+Pure data. No logic.
+
+```python
+@dataclass
+class Trade:
+    trade_id
+    symbol
+    style
+    direction
+    entry_time
+    entry_price
+    sl_price
+    target_price
+    confidence
+    regime
+    reason
+    status  # PROPOSED / OPEN / CLOSED
+```
+
+```python
+@dataclass
+class ExitEvent:
+    exit_time
+    exit_price
+    exit_reason  # SL / TGT / TIME / INVALIDATION
+    pnl_points
+    pnl_rupees
+```
+
+---
+
+## 4.2 `trade/store.py` (Persistence)
+
+Single responsibility:
+
+> Store and retrieve trades.
+
+Backtest → SQLite
+Live → same interface, different backend
+
+```python
+class TradeStore:
+    def insert_trade(trade)
+    def update_trade(trade_id, fields)
+    def get_open_trades()
+    def get_day_trades(date)
+```
+
+No logic. No decisions. Just I/O.
+
+---
+
+## 4.3 `trade/ledger.py` (In-Memory Truth)
+
+This is the **brain of reality**.
+
+```python
+class TradeLedger:
+    open_positions: dict[symbol, Trade]
+    closed_positions: list[Trade]
+
+    def has_open_position(symbol)
+    def open_trade(trade)
+    def close_trade(trade_id, exit_event)
+```
+
+This is what executor queries, not the DB.
+
+DB is history.
+Ledger is truth.
+
+---
+
+## 4.4 `trade/lifecycle.py` (State Machine)
+
+This enforces:
+
+> “No illegal transitions”
+
+```python
+def propose_trade(...)
+def open_trade(...)
+def mark_active(...)
+def close_trade(...)
+```
+
+If someone tries to:
+
+* Close a trade that isn’t open → error
+* Open two positions on same symbol → blocked here
+* Exit twice → impossible
+
+This prevents **silent corruption**.
+
+---
+
+## 4.5 `trade/exit_engine.py`
+
+This is where exits *actually happen*.
+
+Inputs:
+
+* Current price
+* Open trades
+* Market state
+
+Outputs:
+
+* Exit events
+
+Rules:
+
+```python
+if price <= sl: exit("SL")
+if price >= target: exit("TGT")
+if time >= max_hold: exit("TIME")
+if structural_invalidated: exit("INVALIDATION")
+```
+
+This must run **every candle**.
+
+Not in backtest.py.
+Not in executor.
+Here.
+
+---
+
+## 4.6 `trade/eod.py`
+
+This is where the system *closes the day*.
+
+```python
+def end_of_day():
+    for open_trade:
+        close_trade(reason="EOD")
+    compute_daily_stats()
+    persist_report()
+```
+
+This is what gives you:
+
+* Daily PnL
+* Win rate
+* Avg R:R
+* Style performance
+
+Without this, your backtest is fake.
+
+---
+
+## 4.7 `trade/reporter.py`
+
+This produces:
+
+* Equity curve
+* Per-style stats
+* Drawdown
+* Sharpe-like metrics
+* Missed trades
+* Zero-trade days
+
+This is where **learning happens**.
+
+---
+
+# 5. How Flow Changes (System-Wide)
+
+## Current (broken reality)
+
+```
+backtest.py
+  → executor
+    → insert trade to DB
+      → nothing tracks it
+        → no exit
+          → no pnl
+```
+
+This is not a trading system. It’s logging.
+
+---
+
+## Correct Flow (v2.8+)
+
+```
+Orchestrator (every 15m)
+  → Research Engine
+    → Executor proposes trade
+      → TradeLifecycle.open_trade()
+        → Ledger.open_trade()
+          → Store.insert_trade()
+
+Every candle:
+  → ExitEngine.check_exits()
+    → Ledger.close_trade()
+      → Store.update_trade()
+
+EOD:
+  → EOD.close_all()
+    → Reporter.generate()
+```
+
+This is a **real trading engine**.
+
+---
+
+# 6. Rich Data Model (What You MUST Record)
+
+This is where your system becomes research-grade.
+
+Every trade should store:
+
+### Entry Context
+
+* style
+* regime
+* session_phase
+* confidence
+* reason (LLM)
+* trend_efficiency
+* ATR
+* OR_range
+* location (support/resistance/mid)
+* compression/stall flags
+
+### Exit Context
+
+* exit_reason
+* bars_held
+* mfe (max favorable excursion)
+* mae (max adverse excursion)
+* exit_time
+* exit_price
+
+### Performance
+
+* pnl_points
+* pnl_rupees
+* R-multiple
+* slippage
+* spread
+
+### Meta
+
+* config_hash
+* system_version
+* git_commit
+* backtest_session_id
+
+This is what lets you answer:
+
+> “Why did REMR lose money in rotation in Jan?”
+
+Not with vibes.
+With data.
+
+---
+
+# 7. Logging Standard (Non-Negotiable)
+
+Every trade must generate:
+
+### On Entry
+
+```
+[TRADE OPEN]
+ID=123
+Style=ITC
+Dir=CALL
+Entry=25640
+SL=25590
+TGT=25740
+Conf=0.81
+Regime=ROTATION
+Reason="ITC aligns with neutral bias"
+```
+
+### On Exit
+
+```
+[TRADE CLOSE]
+ID=123
+Exit=25710
+Reason=TGT
+BarsHeld=4
+PnL=+70pts (+₹3500)
+MFE=+82
+MAE=-12
+```
+
+### On EOD
+
+```
+[EOD SUMMARY]
+Trades=3
+Wins=2 Losses=1
+PnL=+₹4200
+BestStyle=REMR
+WorstStyle=ITC
+DD=-₹800
+```
+
+If your logs don’t look like this → you are blind.
+
+---
+
+# 8. Why This Layer Is Psychologically Critical
+
+Without this layer:
+
+* You argue about gates
+* You argue about REMR thresholds
+* You argue about LLM prompts
+
+But you never know:
+
+> Which idea actually made money.
+
+With this layer:
+
+You stop debating.
+You **measure**.
+
+---
+
+# The One-Line Truth
+
+Right now you have:
+
+> A decision engine.
+
+What you are building now is:
+
+> A **trading organism with memory, life-cycle, and economics**.
+
+This trade & ledger layer is not “another module”.
+
+It is the **spine of the entire system**.
+
+Everything else is just senses.
+
+
+Metrics addition: 
+
+FINAL EXECUTABLE PLAN — v2.8 Trade Engine Integration
+Objective
+
+Integrate the new trade/ subsystem as the sole authority for position state, exits, and performance metrics, while preserving all existing entry logic.
+
+After this step:
+
+Every trade that enters must flow through:
+
+Brain → Research Engine → Executor → Trade Engine → Exit Engine → Ledger → Reporter
+
+No bypasses. No duplicates. No shadow state.
+
+PHASE 1 — Kill All Legacy Trade State (Hard Requirement)
+Files to Audit and Remove Trade State From
+
+Antigravity must search and remove:
+
+File	What must be deleted
+hot_path/executor.py	Any open_position, current_trade, trade_ledger
+engine/modes/backtest.py	Any _sync_trades_to_db()
+engine/modes/live.py	Any trade persistence
+workers/oms.py	Any position tracking
+brokers/*	Any PnL computation
+Invariant
+
+After this phase:
+
+There exists exactly ONE source of truth for trades:
+
+trade/store.py + trade/ledger.py
+
+If any other file stores PnL → FAIL.
+
+PHASE 2 — Entry Wiring (Critical)
+Where Entries Must Occur
+
+Only this function may open trades:
+
+trade/lifecycle.py → open_trade()
+
+Executor Contract
+
+File: executor/execute.py
+
+Must do:
+
+from trade.lifecycle import propose_trade, open_trade
+
+if final_action in ["BUY_CALL", "BUY_PUT"]:
+    proposal = propose_trade(
+        style=selected_style,
+        direction=action,
+        entry_price=price,
+        sl_points=sl,
+        target_points=tgt,
+        confidence=final_conf,
+        metadata=full_context
+    )
+    open_trade(proposal)
+
+Forbidden
+
+Executor must NOT:
+
+calculate PnL
+
+track open trades
+
+manage exits
+
+write to DB
+
+Executor only proposes.
+
+PHASE 3 — Exit Wiring (Mandatory Loop)
+Exit must be checked on EVERY candle
+
+File: engine/modes/backtest.py
+
+Inside main loop:
+
+from trade.exit_engine import check_exits
+
+for candle in day:
+    decision = research_engine.step(candle)
+    executor.execute(decision)
+    check_exits(candle)
+
+Exit engine must:
+
+evaluate SL / TGT / TIME
+
+close trade via lifecycle.close_trade()
+
+update ledger metrics
+
+persist ExitEvent
+
+If exits are not called every candle → system is fake.
+
+PHASE 4 — EOD Enforcement
+
+At exactly 15:30:
+
+from trade.eod import end_of_day
+
+end_of_day(current_day)
+
+
+This must:
+
+force close open trades
+
+compute DailySummary
+
+persist day metrics
+
+No trade may survive past day boundary.
+
+PHASE 5 — Reporting Authority
+
+Only one place generates metrics:
+
+trade/reporter.py → generate_session_report()
+
+
+At end of backtest:
+
+report = generate_session_report()
+print(report)
+
+
+No other metrics anywhere else are valid.
+
+PHASE 6 — Mandatory Logging Contract
+
+Antigravity must implement exactly these logs.
+
+On Entry
+[TRADE OPEN]
+ID=17 Style=REMR Dir=BUY_CALL
+Entry=25480 SL=25450 TGT=25540
+Confidence=0.61
+
+On Each Candle While Active
+[TRADE UPDATE]
+ID=17 Bars=4
+Unrealized=+28pts (₹1400)
+MFE=+36 MAE=-12
+
+On Exit
+[TRADE CLOSE]
+ID=17 Exit=TGT
+Realized=+40pts (₹2000)
+Peak=+36
+ExitEfficiency=89%
+
+On EOD
+[EOD SUMMARY]
+Trades=3 Wins=2 Losses=1
+PnL=₹4200
+MaxDD=-₹900
+AvgMFE=+52 AvgMAE=-18
+
+On Backtest End
+[SESSION REPORT]
+Days=18
+Trades=61
+TotalPnL=₹48,200
+MaxDD=-₹6,300
+ProfitFactor=1.92
+Expectancy=₹790
+BestStyle=REMR
+MissedDays=4
+
+PHASE 7 — Invariants (These Are Law)
+
+Antigravity must verify:
+
+Structural
+
+No file > 300 lines except reporter
+
+No trade logic in brain, executor, broker
+
+Logical
+
+Exit engine runs every candle
+
+EOD always closes positions
+
+Backtest and Live share same lifecycle
+
+Data
+
+MFE / MAE populated for every trade
+
+Exit efficiency exists for every closed trade
+
+DailySummary exists for every trading day
+
+Scientific
+
+You can answer in 30 seconds:
+
+Why a trade lost
+
+How much profit it gave back
+
+Why a day had no trades
+
+What This Gives You (Real Outcome)
+
+After this plan:
+
+You will finally be able to answer:
+
+Are entries good but exits bad?
+
+Are losses small but frequent?
+
+Are winners giving back too much?
+
+Which style actually makes money?
+
+Which days are structurally missed?
+
+Which means:
+
+From this point onward, all strategy work becomes data-driven instead of belief-driven.

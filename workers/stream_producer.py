@@ -6,7 +6,7 @@ import random
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from fyers_apiv3.FyersWebsocket import data_ws
-from brokers.fyers.auth import load_token
+from engine.auth_fyers import validate_token_file as load_token
 from data.database import get_connection, get_fyers_symbol
 
 load_dotenv()
@@ -18,7 +18,7 @@ import pytz
 IST = pytz.timezone('Asia/Kolkata')
 
 class StreamProducer:
-    def __init__(self, mode="LIVE", days=1, symbol="BANKNIFTY"):
+    def __init__(self, mode="LIVE", days=1, symbol="NIFTY"):
         self.mode = mode
         self.days = days
         self.symbol = symbol
@@ -172,7 +172,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mock", action="store_true", help="Run in Adversarial Mock Mode")
     parser.add_argument("--days", type=int, default=1, help="Number of days to simulate in Mock mode")
-    parser.add_argument("--symbol", type=str, default="BANKNIFTY", help="Symbol to stream")
+    parser.add_argument("--symbol", type=str, default="NIFTY", help="Symbol to stream")
     args = parser.parse_args()
     
     producer = StreamProducer(mode="MOCK" if args.mock else "LIVE", days=args.days, symbol=args.symbol)

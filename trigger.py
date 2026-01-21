@@ -2,7 +2,7 @@ import argparse
 import subprocess
 import time
 import sys
-from brokers.fyers.auth import FyersAuth
+from engine.auth_fyers import validate_token_file as check_auth, authenticate_fyers as do_auth
 
 def run_command(command):
     try:
@@ -22,9 +22,9 @@ def kill_existing():
 def trigger(mode, days, debug, symbol="NIFTY", start_date=None, end_date=None, balance=30000, **kwargs):
     # --- 1. SMART LOGIN CHECK ---
     print("🔐 Checking Fyers Authentication...")
-    if not FyersAuth.validate_token():
+    if not check_auth():
         print("⚠️ Token Expired or Missing. Initiating Login...")
-        if not FyersAuth.authenticate():
+        if not do_auth():
             print("❌ Login Failed. Aborting.")
             return
     else:
@@ -93,7 +93,8 @@ if __name__ == "__main__":
     parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD)")
     parser.add_argument("--symbol", type=str, default="NIFTY", help="Ticker symbol")
     parser.add_argument("--balance", type=int, default=30000, help="Starting balance in rupees (default: 30000)")
-    parser.add_argument("--chat-id", type=str, help="Telegram Chat ID for notifications")
+    import os
+    parser.add_argument("--chat-id", type=str, default=os.getenv("TELEGRAM_CHAT_ID", "1106305616"), help="Telegram Chat ID for notifications")
     parser.add_argument("--debug", action="store_true", help="Enable fast schedule for testing")
     
     if len(sys.argv) == 1:
