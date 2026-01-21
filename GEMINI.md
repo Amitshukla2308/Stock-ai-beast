@@ -1,106 +1,208 @@
-# 🧠 GEMINI Knowledge Base: Efficiency & Architectural Guardrails
+# 🧠 GEMINI Knowledge Base: The Only Truth Architecture
 
-This document serves as the **Long-Term Memory** for developers (AI and Human) working on the Beast. It captures critical pitfalls, philosophy, and strategies to implement complex business logic changes faster.
+This document serves as the **Long-Term Memory** for developers (AI and Human) working on the Beast. It captures the non-negotiable architectural laws that govern the system to ensure research validity and execution determinism.
 
-## 🏛️ Core Philosophy: Authority Split
-The system is divided into two distinct authorities. Understanding this is critical for any logic change.
+## 🏛️ Core Philosophy: The One Rule
 
-1.  **The Brain (LLM)**: Responsible for **Qualitative Strategy**.
-    *   **Role**: Analyzes Context, Sentiment, and Structure. Suggests "Action" and "Style".
-    *   **Location**: [llm_client.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/brain/llm_client.py) (Logic), [prompts.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/brain/prompts.py) (Instructions).
-2.  **The Executor (Deterministic Algo)**: Responsible for **Quantitative Execution**.
-    *   **Role**: Receives Style from Brain. **ENFORCES hard-coded geometric rules** (SL/Target).
-    *   **Power**: Overrides LLM's suggested stops with mathematical precision.
-    *   **Location**: [executor.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py) ([_apply_style_geometry](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py#L85-124)).
+**Anything derived purely from market data = Enrichment layer.**
+**Anything that decides actions = Decision layers.**
+**Anything that sends orders = Executor.**
+**Modes (backtest/live/mock) NEVER compute market physics.**
 
-## ⚡ Speed Guidelines: How to implement 2x Faster
+### North Star Invariants
+If any of these are violated, the system is invalid:
+1.  **No file > 300 LOC**.
+2.  **No threshold exists in Python code** (Must be in Config).
+3.  **Every trade decision is traceable end-to-end**.
+4.  **LLM cannot veto eligibility** (Only selects preferences).
+5.  **Zero-trade day must explain exactly why** (Traceability).
+6.  **Modes are Adapters**: `backtest.py` and `live.py` only feed candles; they never calculate indicators (ATR, TER, etc.).
+
+---
+
+## 🗺️ The Canonical Logic Map
+
+### 1. Market Physics (Enrichment)
+**Where**: `enrichment/`
+**Role**: "What is reality?" (Facts only, Numbers only, No Decisions)
+
+| Metric | Computed In | Why |
+| :--- | :--- | :--- |
+| **ATR** | `enrichment/volatility.py` | Universal volatility physics. |
+| **OR Range** | `enrichment/volatility.py` | Market structure foundation. |
+| **Trend Efficiency (TER)** | `enrichment/trend.py` | Structural quality metric. |
+| **Momentum Slope** | `enrichment/trend.py` | Directional force. |
+| **Support/Resistance** | `enrichment/levels.py` | Structural anchors. |
+| **Location Class** | `enrichment/location.py` | Contextual positioning (MID/NEAR/EXTREME). |
+
+### 2. Microstructure Signals
+**Where**: `signals/`
+**Role**: "What patterns exist?" (Booleans only, No Thresholds/Logic)
+
+| Signal | Computed In | Purpose |
+| :--- | :--- | :--- |
+| **Stall** | `signals/stall.py` | Reversion trigger (REMR). |
+| **Rejection** | `signals/rejection.py` | Mean reversion confirmation. |
+| **Compression** | `signals/compression.py` | Breakout precursor (VBD). |
+| **Range Break** | `signals/range_break.py` | Volatility Breakout trigger. |
+| **Structural Break** | `signals/structural_break.py` | Trend impulse signal. |
+
+### 3. Strategy Eligibility (First Decision Layer)
+**Where**: `eligibility/style_eligibility.py`
+**Role**: "Is this style structurally allowed?"
+
+This is the **Gatekeeper**. It consumes Enrichment + Signals + Config.
+*   **REMR**: Allowed if `Near Level` + (`Stall` OR `Rejection`).
+*   **ITC**: Allowed if `Trend Regime` + `High TER`.
+*   **Output**: Map of eligible styles (`{'REMR': True, 'ITC': False}`).
+
+### 4. Confidence Engine (Quality Scoring)
+**Where**: `confidence/confidence_engine.py`
+**Role**: "How strong is the setup?" (Pure Math)
+
+Input: Style, Enrichment, Signals.
+Output: Score (0.0 - 1.0).
+*   Base Score (Config).
+*   Adjustments (e.g., `+0.1 if Near Level`, `-0.05 if Low VIX`).
+*   **No Decisions**: Does not say "Yes/No", only "How much".
+
+### 5. LLM Selector (Preference Function)
+**Where**: `llm_selector/selector.py`
+**Role**: "Which allowed style feels best?" (Heuristic)
+
+*   **Input**: Market State + **Eligible Styles Only**.
+*   **Output**: Selected Style.
+*   **Constraint**: Cannot veto eligibility. Cannot invent styles. Cannot apply thresholds.
+
+### 6. Risk Layer (Direction & Expression)
+**Where**: `risk/`
+**Role**: "How to express the trade?"
+
+*   **Direction**: `decide_direction` (BUY_CALL / BUY_PUT / HOLD).
+*   **Countertrend**: Checks strictly against structural breaks.
+*   **Rotational Override**: Can block trades in Chop (Rotational regimes).
+
+### 7. Executor (Final Authority)
+**Where**: `executor/execute.py`
+**Role**: "The Judge & Executioner"
+
+The **ONLY** place that can block a trade based on scores.
+*   **Rule**: If `Confidence < Config[Style].Confidence_Floor` → **HOLD**.
+*   **Action**: Proposes trades to Trade Engine.
+
+### 8. Trade Engine (The Spine) ⭐ NEW v2.8
+**Where**: `trade/`
+**Role**: "What actually happened?" (Reality, not Theory)
+
+The **single source of truth** for all trade state, execution, and reporting.
+
+| Module | Responsibility |
+| :--- | :--- |
+| `trade/models.py` | Trade, ExitEvent, DailySummary dataclasses |
+| `trade/store.py` | SQLite persistence (`trades` table) |
+| `trade/ledger.py` | In-memory position state (MFE/MAE tracking) |
+| `trade/lifecycle.py` | State machine: PROPOSED → OPEN → CLOSED |
+| `trade/exit_engine.py` | SL/TGT exits (runs **every candle**) |
+| `trade/eod.py` | EOD force-close + daily stats |
+| `trade/reporter.py` | Session reports with style/exit breakdowns |
+
+**Trade Lifecycle:**
+```
+PROPOSED → OPEN → ACTIVE → EXITED → CLOSED → ARCHIVED (EOD)
+```
+
+**Non-Negotiables:**
+*   No "implicit close". Every exit is logged.
+*   No "forgot to log". State machine enforces transitions.
+*   Ledger is truth. DB is history.
+
+---
+
+## ⚡ The True Execution Flow (Daily Mantra)
+
+```mermaid
+graph TD
+    Tick --> Enrichment[Enrichment - Physics]
+    Enrichment --> Signals[Signals - Patterns]
+    Signals --> Eligibility[Eligibility - Strategy Rules]
+    Enrichment --> Eligibility
+    Eligibility --> LLM[LLM - Selection]
+    LLM --> Risk[Risk - Direction]
+    Risk --> Executor[Executor - Final Gate]
+    Executor --> TradeEngine[Trade Engine - Reality]
+    TradeEngine --> Ledger[Ledger - In-Memory Truth]
+    TradeEngine --> Store[Store - DB Persistence]
+    TradeEngine --> ExitEngine[Exit Engine - Every Candle]
+    ExitEngine --> Ledger
+    TradeEngine --> EOD[EOD - Daily Close]
+    EOD --> Reporter[Reporter - Metrics]
+```
+
+## 🐛 Root Cause Analysis (RCA): The Zero-Value Plague
+
+During the v2.8 migration, a critical bug caused indicators (ATR, TER, OR Range) to return `0.0`. 
+
+### 1. Resolution Bias (Empty Table Trap)
+*   **Issue**: `fetch_context_data` was hardcoded to `candles_1min`. However, backtests often only prefill `candles_5min`.
+*   **Result**: The enrichment layer searched an empty table, returning empty lists, which mathematical functions (like ATR) defaulted to `0.0`.
+*   **Prevention**: Always use **Resolution-Aware Fetching**. Detect if `1min` data exists; if not, fallback to `5min`.
+
+### 2. Stateless Tick Construction (The Warmup Gap)
+*   **Issue**: `BacktestMode` was creating "naked" ticks on every candle, passing only the day's current price action.
+*   **Result**: Indicators requiring prior history (e.g., ATR 14) had no "warmup" data for the first 14 candles of the day, causing them to fail or stay zero.
+*   **Prevention**: Ticks MUST be **Context-Rich**. Always inject the `daily_context` (fetched at 09:15) into every tick packet to provide the necessary historical lookback.
+
+### 3. Timestamp Fragility
+*   **Issue**: Time-parsing logic in `opening_range.py` expected ISO strings (`YYYY-MM-DD HH:MM:SS`) to extract `[11:16]`. `BacktestMode` was passing only `HH:MM:SS`.
+*   **Result**: Comparison `if "09:15" <= time_str <= "10:00"` failed silently, returning an empty range.
+*   **Prevention**: Use **Full ISO Timestamps** throughout the pipeline. Never pass partial time strings to enrichment modules.
+
+### 4. Database Concurrency (Locking)
+*   **Issue**: Expensive `UNION` queries across large tables in a single transaction caused `OperationalError: database is locked`.
+*   **Result**: Context fetching failed mid-tick, leading to missing data in decision logs.
+*   **Prevention**: Avoid `UNION` on hot paths. Perform a quick metadata check for the table name first, then query the specific table.
+
+---
+
+## 🛠️ Maintenance Protocols
+
+### 1. Adding a New Signal
+1.  **Create** `signals/new_pattern.py`. Return `True/False`.
+2.  **Update** `engine/research_engine.py` to call it.
+3.  **Update** `eligibility/style_eligibility.py` to use it in a strategy.
+
+### 2. Changing a Threshold (e.g., REMR distance)
+1.  **NEVER** touch Python code.
+2.  **Update** `config/trading_config.json`.
+3.  **Verify** `config/config_loader.py` handles it.
+
+### 3. Debugging a "Missing Trade"
+Follow the Trace Chain in logs:
+1.  `REMR_candidate`: Was it eligible? (Check `eligibility`)
+2.  `REMR_survived_risk`: Did Risk layer allow direction?
+3.  `REMR_survived_confidence`: Was Score > Floor? (Check `confidence` vs `config`)
+4.  `REMR_executed`: Did Broker accept it?
+
+---
+
+## 🚀 Speed Guidelines: How to implement 2x Faster
 
 ### 1. Contract-First Logic Changes
-**Problem**: Time lost chasing `KeyError` or `NameError` due to mismatched keys between enrichment and policy.
-**Solution**: Before touching logic, write down the *Data Contract*.
-- **Task**: "Add OR Regime to Policy."
-- **Contract**: [calculate_style_eligibility](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/enrichment.py#L632) now REQUIRES `today_5min`.
-- **Action**: Immediately grep all call sites and inject the new dependency *before* implementing the logic.
+**Problem**: Logic errors due to missing data keys.
+**Solution**: Define the `Contract` first.
+*   "To detect V-Reversal, I need `daily_low` in enrichment."
+*   Add to `ResearchEngine` enrichment **before** writing the signal logic.
 
 ### 2. Proactive Signature Audits
-**Problem**: Standard Python `locals()` or implicit context leads to silent failures.
-**Solution**: Never assume a variable (like `context`) exists in the local scope of a helper function.
-- **Rule**: If a function needs data from the "outside," pass it explicitly in the signature.
-- **Workflow**: Change signature -> Mandatory Grep Callers -> Implement Logic.
+**Problem**: Helper functions assuming local scope variables.
+**Solution**: Pass everything explicitly.
+*   Bad: `def check(x): return x > context['atr']`
+*   Good: `def check(x, atr): return x > atr`
 
-### 3. Log-Driven Verification (Short-Circuit)
-**Problem**: Waiting for full backtests is slow.
-**Solution**: Insert `logger.info("[INTERFACE] Passing X to Y")` and run with `--debug` for a 15-minute slice.
-- Verify the *interface bridge* works, then let the full backtest run in the background.
-
----
-
-## 🏗️ Architectural Pitfalls (Phase 2.5 Learnings)
-
-### The "REMR Rejection" Rule
-- **Logic**: Price at S/R is **Location**; a wick/body rejection pattern is **Behavior**.
-- **The Gate**: Never allow a Mean Reversion (REMR) entry unless [detect_rejection_pattern](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/enrichment.py#L79) returns a valid pattern.
-
-### The "Trend Energy" Requirement
-- **Logic**: Entering a trend without energy is "fighting the drift."
-- **The Gate**: `TREND` acceptance strictly requires [Impulse OR ExpandVol](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/brain/llm_client.py#L827).
-
-### Momentum-Location Conflict
-- **The Rule**: If `Close > Pivot` AND `MomentumSlope > 0`, **all Shorts are blocked** regardless of REMR signals.
-- **Pointer**: Implemented as a universal filter in [get_tactical_update](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/brain/llm_client.py#L843).
-
-### Frozen State Prevention
-- **The Pitfall**: `open_position` metadata is snapshotted at **Entry**. Changing configuration files mid-trade will NOT affect it.
-- **The Fix**: Manually patch `self.open_position` in [executor.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py) for live fixes on ongoing trades.
-
-### The "Cold Start" Index Trap
-- **The Pitfall**: Accessing `daily_3[0]` (previous day) assumes history exists. On Day 1 of a long backtest (e.g., 720 days), `daily_3` is empty `[]`.
-- **The Fix**: Always use safe extraction: `prev_day = daily_3[0] if daily_3 else {}`.
-- **Impact**: Caused `IndexError: list index out of range` repeatedly during initialization.
-
-### The "Look-Ahead" Data Leakage
-- **The Pitfall**: `daily_3` comes from the DB. In a backtest, this list can include "Today's Candle" (partially or fully formed) because the DB query is simply "Latest 3 candles".
-- **The Symptom**: `prev_close` becomes Today's Close. Gap calculation logic breaks (Gap = Open - TodayClose), often resulting in tiny or inverse gaps (e.g., -0.4 pts).
-- **The Fix**: In `backtest.py`, always filter `daily_3` to find the first candle where `date < current_sim_date`.
-
-### The "Silent Default" Bug (Data Echo vs Authority)
-- **The Pitfall**: Reading computed metrics like `retracement_depth` or `momentum_slope` from the LLM's response (`data.get('micro_context')`).
-- **The Risk**: The LLM often omits these nested keys or hallucinations values. Usage falls back to the default (e.g., "UNCERTAIN", 0.0), bypassing critical logic gates silently.
-- **The Fix**: ALWAYS read these metrics from the local `micro_context` variable calculated by `enrichment.py` at the top of `get_tactical_update`.
-- **Rule**: `data[...]` is for LLM Decisions (Action/Style). `micro_context[...]` is for Engine Facts.
+### 3. Log-Driven Verification
+**Problem**: Waiting for full backtests.
+**Solution**: Use `logger.info(f"[TRACE] {value}")` and run a 10-minute slice to verify data flow before full simulation.
 
 ---
 
----
-
-## 🛡️ Maintenance Rules
-1. **Grep Before Edit**: Always grep the function name before changing its arguments.
-2. **Unified Keys**: Use `reference_levels` (support/pivot/resistance) consistently across `llm_client.py` and `enrichment.py`.
-3. **Counterfactual Consistency**: If you change `STYLE_PARAMS`, you MUST update [counterfactual_truth.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/counterfactual_truth.py) or the reports will be inaccurate.
-
----
-
-## 🚀 Phase 2.6: Advanced Reversals & Robustness
-
-### LLM JSON Regex Fallback
-- **The Pitfall**: LLMs often truncate output or hallucinate nested braces, causing `json.loads` to fail even after heuristic fixing.
-- **The Solution**: Implemented a **Regex Last Resort** in [_query_model](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/brain/llm_client.py#L165-180).
-- **Rule**: If JSON parsing fails, use regex to extract critical keys (`notes`, `reference_levels`) before giving up.
-
-### The "V-Reversal" Intelligence
-- **Logic**: Sharp turns often happen after extreme stretch without a standard consolidation ("V-Bottom").
-- **The Gate**: `detect_v_reversal` triggers if `Exhaustion @ EM Low + Behavioral Rejection + Fast recovery`.
-- **Policy**: ITC style is explicitly whitelisted for counter-trend reversals if `v_reversal=True`.
-- **Location**: Implemented in [enrichment.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/enrichment.py#L152-180).
-
-### Intraday Directional Consistency
-- **Problem**: Micro-momentum (`net_progress_3`) is too noisy for determining global trend alignment on large gap days.
-- **Solution**: Use **Progress Since Open** (`Current Close - Intraday Open`) as the authoritative baseline for alignment.
-- **Rule**: A `BUY_CALL` override only triggers if price is ABOVE the intraday open, regardless of micro-vips.
-- **Location**: Updated in [get_tactical_update](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/brain/llm_client.py#L916-925).
-
-### UI & Log Refinement Protocol
-- **The Pitfall**: Assuming `JSON` payload keys automatically translate to visible text in Telegram/UI.
-- **The Reality**: Third-party services (n8n, frontends) often use hardcoded templates or only extract specific fields. Adding a new key like `'balance'` to the JSON is useless if the `message` string isn't updated to include it.
-- **The Fix**: **Explicit Text Injection**. If you want data to be visible, inject it directly into the `message` (Status) or `reason` (Trace) string fields.
-- **Verification Rule**: Use `print(f"<<<TELEGRAM {type}>>> {json_str} <<<END>>>")` in `base_mode.py` to visually inspect the exact payload leaving the engine. Do not guess.
+*This document is the supreme law of the codebase. Any code violating these layers is a bug.*

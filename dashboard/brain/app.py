@@ -1,5 +1,5 @@
 import streamlit as st
-import duckdb
+import sqlite3
 import pandas as pd
 import plotly.express as px
 import json
@@ -33,7 +33,9 @@ def get_connection():
             st.warning(f"Could not refresh DB shadow copy: {e}")
     
     try:
-        conn = duckdb.connect(SHADOW_PATH, read_only=True)
+        # Connect to shadow copy
+        conn = sqlite3.connect(SHADOW_PATH)
+        conn.row_factory = sqlite3.Row
         return conn
     except Exception as e:
         st.error(f"Failed to connect to DB: {e}")
@@ -50,7 +52,8 @@ st.sidebar.markdown("---")
 
 # --- DATA FETCHING ---
 try:
-    tables_df = conn.execute("SHOW TABLES").fetchdf()
+    tables_query = "SELECT name FROM sqlite_master WHERE type='table'"
+    tables_df = pd.read_sql_query(tables_query, conn)
     tables = tables_df['name'].values.tolist()
 
     if 'simulation_sessions' not in tables:
@@ -58,7 +61,7 @@ try:
         st.stop()
 
     # 1. Get Runs from simulation_sessions (Source of Truth)
-    df_runs = conn.execute("SELECT * FROM simulation_sessions ORDER BY created_at DESC").fetchdf()
+    df_runs = pd.read_sql_query("SELECT * FROM simulation_sessions ORDER BY created_at DESC", conn)
     
     if df_runs.empty:
         st.info("No recorded sessions yet.")
@@ -76,26 +79,26 @@ try:
     # A. Live Trades (simulation_trades)
     df_trades = pd.DataFrame()
     if 'simulation_trades' in tables:
-        df_trades = conn.execute("SELECT * FROM simulation_trades WHERE session_id = ? ORDER BY entry_time DESC", (selected_run_id,)).fetchdf()
+        df_trades = pd.read_sql_query("SELECT * FROM simulation_trades WHERE session_id = ? ORDER BY entry_time DESC", conn, params=(selected_run_id,))
 
     # B. Live Logs (simulation_logs)
     df_logs = pd.DataFrame()
     if 'simulation_logs' in tables:
-        df_logs = conn.execute("SELECT * FROM simulation_logs WHERE session_id = ? ORDER BY timestamp DESC LIMIT 500", (selected_run_id,)).fetchdf()
+        df_logs = pd.read_sql_query("SELECT * FROM simulation_logs WHERE session_id = ? ORDER BY timestamp DESC LIMIT 500", conn, params=(selected_run_id,))
 
     # C. EOD Experience (experience_replay) - Might be empty if mid-day
     df_exp = pd.DataFrame()
     if 'experience_replay' in tables:
         # Filter by string containment since experience PK is {RUN}_{DATE}
         # Safe check using LIKE
-        df_exp = conn.execute(f"SELECT * FROM experience_replay WHERE session_id LIKE '{selected_run_id}%' ORDER BY date DESC").fetchdf()
+        df_exp = pd.read_sql_query(f"SELECT * FROM experience_replay WHERE session_id LIKE '{selected_run_id}%' ORDER BY date DESC", conn)
 
     # D. Nuggets
     df_nuggets = pd.DataFrame()
     if 'knowledge_nuggets' in tables:
         # Join with experience to filter by run, or brute force filter
         # We stored nuggets with session_id same as experience_replay ({RUN}_{DATE})
-        df_nuggets = conn.execute(f"SELECT * FROM knowledge_nuggets WHERE session_id LIKE '{selected_run_id}%' ORDER BY created_at DESC").fetchdf()
+        df_nuggets = pd.read_sql_query(f"SELECT * FROM knowledge_nuggets WHERE session_id LIKE '{selected_run_id}%' ORDER BY created_at DESC", conn)
 
 except Exception as e:
     st.error(f"Query Error: {e}")
