@@ -1,0 +1,98 @@
+{
+    "Regime_0": {
+        "avg_vix": 13.3,
+        "avg_velocity": -2.126,
+        "avg_entropy": 2.6512,
+        "vol_ratio": 102.25,
+        "sample_count": 52032,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_1": {
+        "avg_vix": 15.9,
+        "avg_velocity": 49.7352,
+        "avg_entropy": 1.6402,
+        "vol_ratio": 149.56,
+        "sample_count": 388,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_2": {
+        "avg_vix": 14.49,
+        "avg_velocity": -7.9169,
+        "avg_entropy": 2.1738,
+        "vol_ratio": 102.16,
+        "sample_count": 1672,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_3": {
+        "avg_vix": 14.19,
+        "avg_velocity": -5.2059,
+        "avg_entropy": 2.5452,
+        "vol_ratio": 107.29,
+        "sample_count": 18088,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_4": {
+        "avg_vix": 17.45,
+        "avg_velocity": -0.0758,
+        "avg_entropy": 2.636,
+        "vol_ratio": 20.6,
+        "sample_count": 150609,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_5": {
+        "avg_vix": 14.22,
+        "avg_velocity": 5.98,
+        "avg_entropy": 2.5769,
+        "vol_ratio": 107.86,
+        "sample_count": 18032,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_6": {
+        "avg_vix": 14.92,
+        "avg_velocity": 7.127,
+        "avg_entropy": 2.0926,
+        "vol_ratio": 104.22,
+        "sample_count": 908,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_7": {
+        "avg_vix": 14.49,
+        "avg_velocity": -21.2344,
+        "avg_entropy": 2.1773,
+        "vol_ratio": 165.82,
+        "sample_count": 2192,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_8": {
+        "avg_vix": 14.47,
+        "avg_velocity": 18.9972,
+        "avg_entropy": 2.187,
+        "vol_ratio": 192.93,
+        "sample_count": 2016,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_9": {
+        "avg_vix": 13.2,
+        "avg_velocity": 0.9705,
+        "avg_entropy": 2.6469,
+        "vol_ratio": 101.42,
+        "sample_count": 54676,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_10": {
+        "avg_vix": 15.1,
+        "avg_velocity": 1.3906,
+        "avg_entropy": 2.6599,
+        "vol_ratio": 63.84,
+        "sample_count": 58976,
+        "dominating_action": "BUY_CALL"
+    },
+    "Regime_11": {
+        "avg_vix": 15.74,
+        "avg_velocity": -52.9322,
+        "avg_entropy": 1.5766,
+        "vol_ratio": 135.56,
+        "sample_count": 340,
+        "dominating_action": "BUY_CALL"
+    }
+}

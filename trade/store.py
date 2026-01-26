@@ -18,13 +18,14 @@ class TradeStore:
     """
     
     def __init__(self):
-        # self._ensure_schema()
+        self._ensure_schema()
         pass
     
     def _ensure_schema(self):
-        """Ensure trades table exists with all required columns"""
+        """Ensure trades table exists with all required columns (Robust Migration)"""
         conn = get_connection()
         try:
+            # 1. Create Base Table if not exists
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     trade_id TEXT PRIMARY KEY,
@@ -54,17 +55,45 @@ class TradeStore:
                     pnl_rupees REAL,
                     mfe REAL,
                     mae REAL,
+                    pnl_edge_death REAL,
+                    etd REAL,
                     config_hash TEXT,
                     system_version TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
+            # 2. Check existing columns
+            cursor = conn.execute("PRAGMA table_info(trades)")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+            
+            # 3. Add missing columns (Idempotent)
+            migrations = [
+                ("is_counterfactual", "INTEGER DEFAULT 0"),
+                ("block_reason", "TEXT"),
+                ("shadow_exit_price", "REAL"),
+                ("shadow_exit_time", "TEXT"),
+                ("shadow_exit_reason", "TEXT"),
+                ("shadow_pnl", "REAL"),
+                ("physics_ctx", "TEXT"), # Spec-002 Research State
+                ("edge_death_bar", "INTEGER") # v2.9.1 Precise Timeline
+            ]
+            
+            for col, dtype in migrations:
+                if col not in existing_columns:
+                    try:
+                        conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {dtype}")
+                        logger.info(f"[STORE] Migrated schema: Added column '{col}'")
+                    except Exception as e:
+                        logger.error(f"[STORE] Migration failed for '{col}': {e}")
+
             conn.commit()
         finally:
             conn.close()
     
     def insert_trade(self, trade: Trade) -> bool:
         """Insert a new trade record"""
+        import json
         conn = get_connection()
         try:
             conn.execute("""
@@ -73,8 +102,9 @@ class TradeStore:
                     entry_time, entry_price, sl_price, target_price, quantity,
                     confidence, regime, session_phase, trend_efficiency,
                     atr, or_range, location, reason, status,
-                    config_hash, system_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    config_hash, system_version, pnl_edge_death, etd,
+                    is_counterfactual, block_reason, physics_ctx, edge_death_bar
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 trade.trade_id,
                 trade.session_id,
@@ -96,7 +126,13 @@ class TradeStore:
                 trade.reason,
                 trade.status.value,
                 trade.config_hash,
-                trade.system_version
+                trade.system_version,
+                trade.pnl_edge_death,
+                trade.etd,
+                1 if trade.is_counterfactual else 0,
+                trade.block_reason,
+                json.dumps(trade.physics_ctx) if trade.physics_ctx else "{}",
+                trade.edge_death_bar
             ))
             conn.commit()
             logger.debug(f"[STORE] Inserted trade {trade.trade_id}")
@@ -138,7 +174,10 @@ class TradeStore:
             "pnl_points": trade.pnl_points,
             "pnl_rupees": trade.pnl_rupees,
             "mfe": trade.mfe,
-            "mae": trade.mae
+            "mae": trade.mae,
+            "pnl_edge_death": trade.pnl_edge_death,
+            "edge_death_bar": trade.edge_death_bar,
+            "etd": trade.etd
         })
     
     def get_open_trades(self, session_id: Optional[str] = None) -> List[Dict]:
@@ -165,7 +204,17 @@ class TradeStore:
             )
             rows = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description]
-            return [dict(zip(columns, row)) for row in rows]
+            
+            import json
+            results = []
+            for row in rows:
+                res = dict(zip(columns, row))
+                if 'physics_ctx' in res and res['physics_ctx']:
+                    try: res['physics_ctx'] = json.loads(res['physics_ctx'])
+                    except: res['physics_ctx'] = {}
+                results.append(res)
+                
+            return results
         finally:
             conn.close()
 

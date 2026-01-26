@@ -22,7 +22,9 @@ class ExitReason(Enum):
     TIME = "TIME"
     EOD = "EOD"
     INVALIDATION = "INVALIDATION"
+    EDGE_DEATH = "EDGE_DEATH"
     MANUAL = "MANUAL"
+    AI_LOGIC = "AI_LOGIC"
 
 
 @dataclass
@@ -57,6 +59,12 @@ class Trade:
     location: str = "UNKNOWN"
     reason: str = ""
     
+    # Metadata (For Atlas State Vector or other non-structured data)
+    metadata: dict = field(default_factory=dict)
+    
+    # Research State (Spec-002)
+    physics_ctx: dict = field(default_factory=dict) # Velocity, Entropy at entry
+    
     # State
     status: TradeStatus = TradeStatus.PROPOSED
     
@@ -71,6 +79,23 @@ class Trade:
     pnl_rupees: float = 0.0
     mfe: float = 0.0  # Max Favorable Excursion
     mae: float = 0.0  # Max Adverse Excursion
+    
+    # ETD (Spec-002)
+    pnl_edge_death: Optional[float] = None
+    edge_death_bar: Optional[int] = None
+    etd: float = 0.0
+    
+    
+    # Brain vs System Competency (Shadow Exit)
+    shadow_exit_price: Optional[float] = None
+    shadow_exit_time: Optional[datetime] = None
+    shadow_exit_reason: Optional[str] = None
+    shadow_pnl: Optional[float] = None
+    
+    
+    # Counterfactual Tracking (Blocked Trades)
+    is_counterfactual: bool = False
+    block_reason: Optional[str] = None
     
     # Meta
     config_hash: str = ""
@@ -89,6 +114,10 @@ class ExitEvent:
     bars_held: int = 0
     mfe: float = 0.0
     mae: float = 0.0
+    
+    # ETD (Spec-002)
+    pnl_edge_death: Optional[float] = None
+    etd: float = 0.0
 
 
 @dataclass
@@ -107,3 +136,4 @@ class DailySummary:
     trend_efficiency: float = 0.0  # Daily trend quality
     or_range: float = 0.0         # Opening range size
     participation_score: float = 0.0 # participation_rate for the day
+    final_balance: float = 0.0    # Closing balance for the day

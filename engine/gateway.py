@@ -53,7 +53,8 @@ def get_engine(mode, args=None):
     Factory to create the appropriate engine instance.
     """
     if mode == 'backtest':
-        from engine.modes.backtest import BacktestMode
+        from engine.modes.backtest import BacktestMode as EngineClass
+            
         symbol = args.symbol if args else "NIFTY"
         
         if args and args.start_date:
@@ -71,18 +72,12 @@ def get_engine(mode, args=None):
             if args and args.end_date:
                 end_date = datetime.strptime(args.end_date, "%Y-%m-%d")
             else:
-                end_date = datetime.now()
+                end_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             start_date = end_date - timedelta(days=days-1)
 
         # AUTO-PREFILL: Ensure data exists before simulating
-        # AUTO-PREFILL: Ensure data exists before simulating
         try:
-            # Emit Status
-            # Skip token validation for backtests if requested or by default
-            if mode != 'backtest':
-                check_token() # 0. VALIDATE AUTH
-            else:
-                logging.debug("      ⏭️ Skipping Fyers Token validation for Backtest Mode.")
+            logging.debug(f"      ⏭️ Skipping Fyers Token validation for {mode.capitalize()} Mode.")
 
             emit_telegram_signal("STATUS", {"msg": f"⏳ Prefilling Data for {symbol} ({days} days)..."})
             from data.prefill import run as run_prefill
@@ -100,15 +95,20 @@ def get_engine(mode, args=None):
             )
             emit_telegram_signal("STATUS", {"msg": "✅ Data Ready. Starting Simulation..."})
             
+            # 2. Return Engine Instance
+            return EngineClass(
+                start_date=start_date,
+                end_date=end_date,
+                symbol=symbol,
+                resolution=res,
+                initial_balance=args.balance if args else 30000
+            )
         except Exception as e:
             # Emit Error Status
             err_msg = str(e).replace('"', "'")
             emit_telegram_signal("STATUS", {"msg": f"❌ Prefill Failed: {err_msg}"})
             logging.error(f"❌ Critical Prefill Error: {e}")
             raise e # CRITICAL: Stop execution if prefill fails
-        
-        balance = args.balance if args and hasattr(args, 'balance') else 30000
-        return BacktestMode(start_date=start_date, end_date=end_date, symbol=symbol, resolution=res, initial_balance=balance, chat_id=args.chat_id)
         
     elif mode == 'mock':
         from engine.modes.live import LiveMode
@@ -127,7 +127,7 @@ def get_engine(mode, args=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stock AI Beast Gateway")
-    parser.add_argument("mode", choices=['backtest', 'mock', 'live'], nargs='?', help="Trading Mode")
+    parser.add_argument('mode', choices=['live', 'backtest', 'mock'], help='beast operation mode')
     parser.add_argument("--days", type=int, default=5, help="Days for backtest")
     parser.add_argument("--start-date", type=str, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD)")

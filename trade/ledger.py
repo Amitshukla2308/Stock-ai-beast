@@ -24,35 +24,65 @@ class TradeLedger:
     
     def has_open_position(self, symbol: str = None) -> bool:
         """Check if any (or specific) position is open"""
-        if symbol:
-            return symbol in self.open_positions
-        return len(self.open_positions) > 0
+        if not symbol:
+            return len(self.open_positions) > 0
+        # Search values because keys could be trade_ids or symbols
+        for t in self.open_positions.values():
+            if t.symbol == symbol:
+                return True
+        return False
     
     def get_open_position(self, symbol: str = None) -> Optional[Trade]:
         """Get open position for symbol (or first if none specified)"""
-        if symbol:
-            return self.open_positions.get(symbol)
-        if self.open_positions:
-            return list(self.open_positions.values())[0]
+        if not symbol:
+            if self.open_positions:
+                return list(self.open_positions.values())[0]
+            return None
+        
+        for t in self.open_positions.values():
+            if t.symbol == symbol:
+                return t
         return None
+        
+    def has_real_position(self, symbol: str = None) -> bool:
+        """Check if any REAL (non-counterfactual) position is open"""
+        if symbol:
+            trade = self.open_positions.get(symbol)
+            return trade is not None and not trade.is_counterfactual
+        
+        # Check if ANY trade is real
+        for t in self.open_positions.values():
+            if not t.is_counterfactual:
+                return True
+        return False
     
     def open_trade(self, trade: Trade) -> bool:
         """
         Add trade to open positions.
         Returns False if position already exists for symbol.
         """
-        if trade.symbol in self.open_positions:
-            logger.warning(f"[LEDGER] Cannot open: Position already exists for {trade.symbol}")
-            return False
+        is_atlas = trade.metadata.get('is_atlas_probe', False)
+        is_ghost = trade.is_counterfactual
         
-        trade.status = TradeStatus.OPEN
-        self.open_positions[trade.symbol] = trade
+        # We allow concurrent only if it's Atlas or Ghost vs Real.
+        # But for safety, let's just use trade_id as key for everything and rely on high-level logic to block.
+        # Or keep the current spirit: Real trades are single-per-symbol.
+        if not is_atlas and not is_ghost:
+            if self.has_real_position(trade.symbol):
+                logger.warning(f"[LEDGER] Cannot open REAL: Position already exists for {trade.symbol}")
+                return False
+        
+        # Use trade_id as key for everything in v2.9 to avoid collision and support concurrency logic
+        key = trade.trade_id
+        self.open_positions[key] = trade
         
         # Initialize MFE/MAE tracking
         self.daily_high_prices[trade.trade_id] = trade.entry_price
         self.daily_low_prices[trade.trade_id] = trade.entry_price
         
-        logger.info(f"[LEDGER] 📗 Opened: {trade.trade_id} | {trade.direction} @ {trade.entry_price}")
+        C_RESET = "\033[0m"
+        C_GREEN = "\033[92m"
+        logger.info(f"[LEDGER] 📗 {C_GREEN}Opened{C_RESET}: {trade.trade_id} | {trade.direction} @ {trade.entry_price}")
         return True
     
     def update_price_extremes(self, trade_id: str, current_price: float):
@@ -67,11 +97,13 @@ class TradeLedger:
         Close a trade and move to closed positions.
         Returns the closed Trade or None if not found.
         """
-        # Find the trade
+        # Find the trade (key could be symbol or trade_id)
         trade = None
-        for symbol, t in self.open_positions.items():
+        key_to_delete = None
+        for key, t in self.open_positions.items():
             if t.trade_id == trade_id:
                 trade = t
+                key_to_delete = key
                 break
         
         if not trade:
@@ -100,15 +132,20 @@ class TradeLedger:
         trade.mfe = exit_event.mfe if exit_event.mfe else trade.mfe
         trade.mae = exit_event.mae if exit_event.mae else trade.mae
         
-        # Move to closed
-        del self.open_positions[trade.symbol]
+        # Move to closed (use the correct key, not symbol)
+        del self.open_positions[key_to_delete]
         self.closed_positions.append(trade)
         
         # Cleanup tracking
         self.daily_high_prices.pop(trade_id, None)
         self.daily_low_prices.pop(trade_id, None)
         
-        logger.info(f"[LEDGER] 📕 Closed: {trade_id} | {exit_event.exit_reason.value} @ {exit_event.exit_price} | PnL: {exit_event.pnl_points:+.1f}pts")
+        C_RESET = "\033[0m"
+        C_RED = "\033[91m"
+        C_GREEN = "\033[92m"
+        pnl_color = C_GREEN if exit_event.pnl_points >= 0 else C_RED
+        
+        logger.info(f"[LEDGER] 📕 Closed: {trade_id} | {exit_event.exit_reason.value} @ {exit_event.exit_price} | PnL: {pnl_color}{exit_event.pnl_points:+.1f}pts{C_RESET}")
         return trade
     
     def get_all_closed(self) -> List[Trade]:

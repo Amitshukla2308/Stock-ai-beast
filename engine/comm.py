@@ -14,6 +14,10 @@ def emit_telegram_signal(event_type, payload, mode_tag="SYSTEM"):
     """
     global _last_telegram_time
     
+    # High-speed Bypass for Learn/Backtest optimization
+    if os.getenv("SKIP_TELEGRAM") == "1":
+        return
+
     try:
         # Rate limiting
         current_time = time.time()

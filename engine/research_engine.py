@@ -1,233 +1,89 @@
 """
-v2.8 Research Engine Orchestrator
-The central pipeline that coordinates all modules to produce Trading Instructions.
-Deterministic Execution Fabric.
+v4.0 Research Engine: The Deterministic Brain
+Coordinates the modular pipeline: Physics -> Regime -> Registry -> RiskGuard.
 """
 import logging
-import json
-from typing import Dict, Any
+import pandas as pd
+from typing import Dict, Any, Optional
+from datetime import datetime
 
-from config.config_loader import config
-from enrichment.session import calculate_time_context
-from enrichment.volatility import calculate_opening_range, calculate_expected_move_envelope, calculate_atr
-from enrichment.trend import calculate_trend_efficiency, calculate_momentum_slope
-from enrichment.levels import get_reference_levels
-from enrichment.location import calculate_proximity, classify_location
-
-from signals.rejection import detect_rejection_pattern
-from signals.compression import detect_compression
-from signals.range_break import detect_range_break
-from signals.structural_break import detect_impulse, detect_structural_break
-from signals.stall import detect_stall
-
-from eligibility.style_eligibility import evaluate_eligibility
-from confidence.confidence_engine import confidence_engine
-from llm_selector.selector import StrategySelector
-from risk.direction import decide_direction
-from audit.trace_logger import trace_logger
+from engine.features.physics_engine import PhysicsEngine
+from engine.features.calculators import AtlasFeatures
+from atlas.regime import Regime
+from atlas.registry import Registry
+from engine.risk_guard import RiskGuard
 
 logger = logging.getLogger(__name__)
 
 class ResearchEngine:
-    """
-    Orchestrates the trading pipeline from raw data to final decision.
-    """
-    def __init__(self, llm_client):
-        self.selector = StrategySelector(llm_client)
+    def __init__(self, wr_floor: float = 0.55):
+        logger.info("🧠 Initializing v4.0 Research Engine (Sovereign Architecture)...")
+        self.physics = PhysicsEngine()
+        self.regime = Regime()
+        self.registry = Registry()
+        self.risk_guard = RiskGuard(wr_floor=wr_floor)
         
-    def process_tick(self, context: Dict[str, Any], plan: Dict[str, Any], allow_llm: bool = True) -> Dict[str, Any]:
+    def process_tick(self, df_5m: pd.DataFrame, df_15m: pd.DataFrame, silent: bool = False) -> Dict[str, Any]:
         """
-        Executes the full modular pipeline.
-        Returns: Decision Packet (Instructions)
+        Executes the v4.0 Pipeline:
+        Physics -> Enrichment -> Regime -> Registry -> RiskGuard
         """
-        # 0. Data Extraction
-        current_time_str = context.get('time_str', 'N/A')
-        close = context.get('close', 0.0)
-        atr = calculate_atr(context.get('last_15min', []))
-        if atr == 0: atr = 15.0 # Warmup default
-        
-        # [LOG] 0. TICK INPUT
-        logger.info(f"[TICK] 🕒 {current_time_str} | Close: {close} | ATR: {atr}")
+        if df_5m.empty or len(df_5m) < 200:
+            return {"decision": {"action": "HOLD", "reason": "Warmup Mode"}}
 
-        today_5min = context.get('today_5min', [])
-        last_15min = context.get('last_15min', [])
-        daily_3 = context.get('daily_3', [])
+        # 1. Physics & Enrichment
+        # Ensure latest candle is enriched
+        df_5m_enriched = self.physics.add_context(df_5m)
+        df_5m_64d = AtlasFeatures.calculate_all(df_5m_enriched)
         
-        # 1. ENRICHMENT (Facts)
-        time_ctx = calculate_time_context(current_time_str)
+        df_15m_enriched = self.physics.add_context(df_15m)
+        df_15m_64d = AtlasFeatures.calculate_all(df_15m_enriched)
         
-        or_data = calculate_opening_range(today_5min)
-        or_range = or_data['or_range'] if or_data else 0.0
+        # 2. Regime Identification
+        c15, c5, physics_vector = self.regime.identify_clusters(df_5m_64d, df_15m_64d)
         
-        prev_day = daily_3[0] if daily_3 else {}
-        prior_day_range = (prev_day.get('h', 0) - prev_day.get('l', 0)) if prev_day else 0
-        em_envelope = calculate_expected_move_envelope(or_range, prior_day_range)
+        # 3. Registry Lookup (Temporal Guard: Use cutoff_time to prevent lookahead)
+        ts_now = df_5m['timestamp'].iloc[-1]
+        alpha_state = self.registry.get_alpha_state(c15, c5, cutoff_time=ts_now)
         
-        levels_dict = get_reference_levels(plan)
+        # 4. Risk Guard Decision
+        current_price = df_5m['close'].iloc[-1]
+        decision = self.risk_guard.validate_alpha(alpha_state, current_price)
         
-        # Safe extraction of trend efficiency
-        ter_data = calculate_trend_efficiency(today_5min)
-        ter, regime, regime_momentum = ter_data if isinstance(ter_data, tuple) else (0.0, "ROTATION", 0.0)
-
-        # Safe extraction of momentum slope
-        slope_data = calculate_momentum_slope(last_15min[-3:] if len(last_15min) >= 3 else [])
-        m_slope, m_consistency = slope_data if isinstance(slope_data, tuple) else (0.0, 0.0)
+        # Narrative Logging
+        wr = alpha_state.get('win_rate', 0.0)
+        ts = df_5m['timestamp'].iloc[-1].strftime('%H:%M:%S')
         
-        prox_data = calculate_proximity(close, levels_dict, or_range, atr)
-        loc_data = classify_location(close, levels_dict, prox_data['proximity_limit'])
+        res_color = "\033[92m" if decision['action'] != "HOLD" else "\033[0m"
+        log_str = f"[ATLAS] 🧠 {ts} | Price: {current_price:,.2f} | Regime: {c15}:{c5} | WR: {wr:.2f} | Action: {res_color}{decision['action']}\033[0m"
         
-        # Consolidate Enrichment for downstream
-        enrichment = {
-            **time_ctx,
-            **(or_data if or_data else {"or_high": None, "or_low": None, "or_range": 0.0}),
-            **em_envelope,
-            **levels_dict, # s1, s2, r1, r2, bc, tc, pivot
-            "trend_efficiency": ter, "trend_regime": regime, "regime_momentum": regime_momentum,
-            "momentum_slope": m_slope, "momentum_consistency": m_consistency,
-            **prox_data, **loc_data,
-            "or_established": or_data is not None,
-            "atr": atr,
-            "vix": context.get('vix', 15.0),
-            "price": close,
-            "symbol": context.get('symbol', 'Nifty'),
-            "time": current_time_str
-        }
+        if not silent:
+            logger.info(log_str)
         
-        # [LOG] 1. ENRICHMENT
-        logger.info(f"[ENRICH] 🌍 Regime: {regime} ({ter:.2f}) | Loc: {loc_data.get('location_class')} | Mom: {m_slope} | Range: {or_range:.0f}")
-        
-        # 2. SIGNALS (Patterns)
-        last_bar_15 = last_15min[-1] if last_15min else {}
-        rejection_pattern = detect_rejection_pattern(last_bar_15, last_15min[:-1])
-        compression = detect_compression(last_bar_15.get('h', 0) - last_bar_15.get('l', 0), atr)
-        range_break = detect_range_break(last_bar_15)
-        impulse_detected, break_dir = detect_impulse(last_15min, atr)
-        struct_break, struct_break_dir = detect_structural_break(close, enrichment['or_high'], enrichment['or_low'], atr)
-        stall = detect_stall(last_bar_15, enrichment.get('near_htf', False)) # Simple stall
-        
-        signals = {
-            "rejection": rejection_pattern != "NONE",
-            "rejection_pattern": rejection_pattern,
-            "compression": compression,
-            "range_break": range_break,
-            "impulse_detected": impulse_detected,
-            "break_direction": break_dir,
-            "structural_break": struct_break,
-            "structural_break_direction": struct_break_dir,
-            "stall": stall
-        }
-        
-        # [LOG] 2. SIGNALS
-        active_signals = [k for k, v in signals.items() if v and v != "NONE" and v is not False]
-        logger.info(f"[SIGNAL] 📡 Detected: {active_signals if active_signals else 'None'}")
-
-        # 3. ELIGIBILITY (Rules)
-        eligible_styles_map = evaluate_eligibility(enrichment, signals)
-        eligible_styles = [s for s, eligible in eligible_styles_map.items() if eligible]
-        
-        # [LOG] 3. ELIGIBILITY
-        logger.info(f"[ELIG] 🚦 Allowed: {eligible_styles}")
-        
-        # 4. LLM GATE (Only skip if not tactical interval)
-        if not allow_llm:
-             return {
-                "decision": {"action": "HOLD", "reason": "LLM Gated (Interval)"},
-                "enrichment": enrichment, 
-                "signals": signals, 
-                "selected_style": "NONE", 
-                "eligible_styles": eligible_styles
-             }
-
-        # 5. LLM TACTICAL CALL (Always at 15-min intervals - Non-Negotiable)
-        market_state = {
-            "price": round(close, 1),
-            "trend_efficiency": ter,
-            "regime": regime,
-            "session_phase": time_ctx['session_phase'],
-            "minutes_since_open": time_ctx['minutes_since_open'],
-            "symbol": enrichment['symbol'],
-            "time": enrichment['time'],
-            "eligible_styles": eligible_styles
-        }
-        
-        # LLM Selection
-        selection = self.selector.select_style(eligible_styles if eligible_styles else ["HOLD"], market_state, plan)
-        selected_style = selection.get('selected_style', 'NONE')
-        
-        # 6. CONFIDENCE (Always calculate if style selected)
-        confidence = 0.0
-        if selected_style not in ["NONE", "HOLD"]:
-            confidence_map = confidence_engine.calculate_confidence([selected_style], enrichment)
-            confidence = confidence_map.get(selected_style, 0.0)
-            logger.info(f"[CONFID] 🧮 Score: {confidence} ({selected_style})")
-        
-        # 7. RISK (Direction & Expression)
-        direction_data = {"action": "HOLD", "reason": "No Strategy Selected"}
-        if selected_style not in ["NONE", "HOLD"]:
-            direction_data = decide_direction(selected_style, enrichment, signals)
-        elif selected_style == "HOLD":
-            direction_data = {"action": "HOLD", "reason": selection.get('reason', 'LLM chose HOLD')}
-            
-        # 8. TRACEABILITY LOGGING (Always log tactical calls for EOD Audit)
-        dummy_decision = {
-            "action": direction_data['action'] if selected_style != "HOLD" else "HOLD", 
-            "confidence": confidence, 
-            "reason": selection.get('reason', 'Decision Processed')
-        }
-        trace_logger.log_decision_chain(
-            tick={"timestamp": enrichment['time']},
-            style=selected_style, 
-            eligibility=eligible_styles_map,
-            risk=direction_data,
-            confidence={"score": confidence}, 
-            decision=dummy_decision
-        )
-        
-        # 9. Gating Returns: If no eligible styles OR LLM selected HOLD/NONE, exit gracefully
-        if not eligible_styles or selected_style in ["NONE", "HOLD"]:
-            logger.info(f"[LLM] 📝 Tactical Response: {selection.get('reason', 'No action')}")
-            return {
-                "decision": {"action": "HOLD", "reason": selection.get('reason', 'No eligible styles')},
-                "enrichment": enrichment,
-                "signals": signals,
-                "selected_style": selected_style,
-                "eligible_styles": eligible_styles
-            }
-            
-        if direction_data['action'] == "HOLD":
-             return {
-                "decision": direction_data,
-                "enrichment": enrichment,
-                "signals": signals,
-                "selected_style": selected_style,
-                "eligible_styles": eligible_styles
-             }
-             
-        # Merge Decision for Output
-        decision = {
-            # Base Decision
-            "action": direction_data['action'],
-            "selected_style": selected_style,
-            "confidence": confidence,
-            "reason": selection.get('reason', 'Signal Generated'),
-            "engine_reason": direction_data.get('reason'), # Filter reason
-            
-            # Geometry (from LLM or Default)
-            "entry_price": selection.get('entry_price', close),
-            "sl": selection.get('sl'),
-            "target": selection.get('target'),
-            "expected_move_high": enrichment.get('expected_range_pts', 0),
-            
-            # Context used
-            "ter": ter,
-            "regime": regime
-        }
-        
-        # Return full results for reporting/logging
         return {
             "decision": decision,
-            "enrichment": enrichment,
-            "signals": signals,
-            "selected_style": selected_style,
-            "eligible_styles": eligible_styles
+            "regime_id": f"{c15}:{c5}",
+            "alpha_state": alpha_state,
+            "physics_vector": physics_vector,
+            "log_str": log_str
         }
+
+    def process_in_trade_tick(self, df_5m: pd.DataFrame, df_15m: pd.DataFrame, trade: Any) -> Dict[str, Any]:
+        """
+        Transition Engine: In-Trade Monitor.
+        Triggers Force Exit if the regime transitions to a non-alpha/trap state.
+        """
+        # Call process_tick silently to avoid double logs
+        result = self.process_tick(df_5m, df_15m, silent=True)
+        alpha_state = result.get('alpha_state', {})
+        wr = alpha_state.get('win_rate', 0.0)
+        regime_id = result.get('regime_id', 'UNKNOWN')
+        
+        # Transition Logic (The "Regime Decay" Guard)
+        # If WinRate < 0.25, it's a Trap regime. Exit immediately.
+        # This constant will move to config in next pass.
+        if wr < 0.25:
+             logger.info(f"   [TRANSITION] 📉 Trap Detected (R{regime_id} | WR {wr:.2f}). Issueing Force Exit.")
+             return {"in_trade_action": "EXIT", "reason": f"Regime Decay (R{regime_id})", "confidence": 1.0}
+             
+        return {"in_trade_action": "HOLD", "reason": f"R{regime_id} Valid", "confidence": 0.0}

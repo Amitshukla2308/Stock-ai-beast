@@ -1,0 +1,14 @@
+
+=== Paired Comparison (Latest Sessions) ===
+Session: BACKTEST_20260123_035110
+  Trades: 2
+  PnL:    40.0
+  MaxDD:  50.0
+  WinRate:50.0%
+------------------------------
+Session: BACKTEST_20260123_034930
+  Trades: 2
+  PnL:    40.0
+  MaxDD:  50.0
+  WinRate:50.0%
+------------------------------

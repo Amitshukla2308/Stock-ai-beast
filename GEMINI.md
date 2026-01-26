@@ -9,6 +9,22 @@ This document serves as the **Long-Term Memory** for developers (AI and Human) w
 **Anything that sends orders = Executor.**
 **Modes (backtest/live/mock) NEVER compute market physics.**
 
+### 🏛️ The Laws of Sovereignty (v2.9.3)
+1.  **The Physical Authority Principle**: `EDGE_STATE` is not a metric; it is a Control Primitive. If `EDGE_STATE == DEAD`, the system must exit immediately. No intelligence layer (Brain/Regime) has the authority to override this death.
+2.  **The D2 Formation Constraint**: `D2 Radar` is a **Formation Sensor** (predicting the birth of an edge/regime shift), NOT a death sensor. Edge death is exclusively governed by Physics (Velocity/Entropy/Regime Invalidation).
+3.  **The Alpha-TGT Boundary**: In high-alpha regimes (9, 11), static `Targets (TGT)` are illegal. They are Phase-2 artifacts. In Phase-3, Alpha trades run until the **Physics Engine** (Edge Death) or **Risk Layer** (SL/MFE) terminates them.
+4.  **Governance Hierarchy**: `SL (Safety) > EDGE_STATE (Physics) > MFE (Math) > BRAIN (Narration)`.
+
+### 🏛️ Data Persistence & Epistemology Store ⭐ UPDATED v2.8.3
+
+| File | Role | Location | Purpose |
+| :--- | :--- | :--- | :--- |
+| **`trading.db`** | **The Spine** | `data/` | **GOLD SOURCE.** Contains NIFTY 2023-2026 candles. |
+| **`market_states.parquet`** | **The Features (X)** | `atlas/data/` | Normalized state vectors for machine learning. |
+| **`outcomes.parquet`** | **The Results (y)** | `atlas/data/` | Aligned trade outcomes (PnL/MAE) - Joined via `trade_id`. |
+| **`trading_audit.db`** | **The Judge** | `data/` | Simulation logs and counterfactual records. |
+| **`trading.db` (ROOT)** | **GHOST** | `root` | **DELETE.** Legacy placeholder from migration. |
+
 ### North Star Invariants
 If any of these are violated, the system is invalid:
 1.  **No file > 300 LOC**.
@@ -106,15 +122,64 @@ The **single source of truth** for all trade state, execution, and reporting.
 | `trade/eod.py` | EOD force-close + daily stats |
 | `trade/reporter.py` | Session reports with style/exit breakdowns |
 
+### 10. The Antigravity Stack (v2.9) ⭐ NEW
+**Where**: `engine/research_engine.py` & `brain/llm_client.py`
+**Role**: "The Flight Computer"
+
+Replaces stochastic logic with a deterministic, monitorable pipeline.
+
+1.  **Atlas (The Truth)**: Identifies Regime Cluster (e.g., R11).
+2.  **Transition Engine**: Maps R_curr → R_next probabilities.
+3.  **D2 Radar (The Timing)**: **PERMANENTLY ENABLED**. Predicts transition probability.
+4.  **Policy Gate**: Static permissions (`policy_table_v1.yaml`).
+5.  **In-Trade Monitor**:
+    *   Runs every 15 mins on ACTIVE trades.
+    *   **Actions**: `HOLD` (Default), `TIGHTEN` (Advisory), `EXIT` (Force Close).
+    *   **Trigger**: Thesis invalidation (e.g., Regime shift to Trap).
+
+### 11. RAG Persistence (The Memory)
+**Where**: `data/database.py` (Nuggets), `trade/eod.py` (Save)
+**Role**: "Lessons Learned"
+
+**North Star**: RAG must never leak future data into the past.
+- [x] **Retrieval**: `WHERE created_at < simulated_now`.
+- [x] **Storage**: `save_experience(timestamp=simulated_now)`.
+- [x] **Result**: Perfect temporal causality in backtests.
+
+### 12. Sage Hyper-Vector Architecture (v3.0) ⭐ NEW
+**Status**: Data Extraction Rig Live (Phase 8.1).
+**Goal**: Move from "Heuristic Engine" to "Truly Autonomous AI."
+
+The system now creates a **Sage Master Vector** by joining three distinct data layers:
+
+1.  **Atlas Physics (X1)**: Numerical state vectors (Velocity, Entropy, TER) from `market_states.parquet`.
+2.  **Structural Reasoning (X2)**: Strict JSON technical vectors (Biased Bull/Bear/Neutral paths) from `knowledge_nuggets`.
+3.  **Oracle Outcomes (y)**: Ground-truth results (MFE/MAE/PnL) for all branches.
+
+**The Training Sample Structure**:
+```json
+{
+  "numerical_context": "Atlas Vector (60+ dimensions)",
+  "v3_reasoning_paths": {
+    "BULL": "Biased Technical Logic + Confidence",
+    "BEAR": "Biased Technical Logic + Confidence",
+    "NEUTRAL": "Observational Balance"
+  },
+  "ground_truth_y": "Best Branch (CALL/PUT/HOLD) based on actual MFE/MAE"
+}
+```
+**North Star**: Future inference will choose the "Reasoning Path" that most closely matches the actual outcome for the current Physics context.
+
 **Trade Lifecycle:**
 ```
 PROPOSED → OPEN → ACTIVE → EXITED → CLOSED → ARCHIVED (EOD)
 ```
 
 **Non-Negotiables:**
-*   No "implicit close". Every exit is logged.
-*   No "forgot to log". State machine enforces transitions.
-*   Ledger is truth. DB is history.
+*   **Visualization**: Logs must use ANSI colors ("The Matrix") for observability.
+*   **No "implicit close"**: Every exit is logged.
+*   **State Machine**: Enforces transitions.
+*   **Ledger is truth**: DB is history.
 
 ---
 
@@ -202,6 +267,8 @@ Follow the Trace Chain in logs:
 ### 3. Log-Driven Verification
 **Problem**: Waiting for full backtests.
 **Solution**: Use `logger.info(f"[TRACE] {value}")` and run a 10-minute slice to verify data flow before full simulation.
+
+
 
 ---
 

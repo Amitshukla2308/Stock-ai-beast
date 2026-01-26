@@ -16,10 +16,11 @@ logger = logging.getLogger(__name__)
 class TradeReporter:
     """Diagnostic Instrument for System Health (Research-Grade)"""
     
-    def generate_session_report(self, session_id: str, daily_summaries: List[DailySummary] = None) -> Dict[str, Any]:
+    def generate_session_report(self, session_id: str, daily_summaries: List[DailySummary] = None, llm_client=None) -> Dict[str, Any]:
         """
         Generate comprehensive canonical session report.
         Phase 3-9 of Reporting v2.8.
+        Optional Phase 10: LLM Research Report.
         """
         raw_trades = trade_store.get_session_trades(session_id)
         if not raw_trades:
@@ -27,15 +28,22 @@ class TradeReporter:
             return {}
 
         # Convert to Trade objects for consistent property access
-        trades = []
+        # Convert to Trade objects for consistent property access
+        all_trades = []
         for rd in raw_trades:
-            # Simple conversion back to Trade-like access if needed, 
-            # but we can use dict access for performance since store returns dicts
-            trades.append(rd)
+            all_trades.append(rd)
+            
+        # Filter Logic (Real vs Ghost)
+        # Note: 'is_counterfactual' stored as 1/0 in DB, so check truthiness
+        trades = [t for t in all_trades if not t.get('is_counterfactual')]
+        ghost_trades = [t for t in all_trades if t.get('is_counterfactual')]
+        
+        closed_ghosts = [t for t in ghost_trades if t.get('status') == 'CLOSED']
 
         closed_trades = [t for t in trades if t.get('status') == 'CLOSED']
         if not closed_trades:
-            return {"session_id": session_id, "total_trades": len(trades), "status": "NO_CLOSED_TRADES"}
+            logger.info("[REPORTER] No CLOSED real trades. Generating report for Ghosts/Analysis...")
+
 
         # --- EXECUTION ENGINE (Phase 3) ---
         exec_metrics = self._compute_executive_metrics(closed_trades)
@@ -43,17 +51,28 @@ class TradeReporter:
         # --- DISTRIBUTION (Phase 4) ---
         distributions = self._compute_distributions(closed_trades)
         
+        # --- REGIME ATTRIBUTION (v4.0 Smart Phase) ---
+        regime_stats = self._compute_regime_attribution(closed_trades)
+        
+        # --- ALPHA QUALITY (v4.0 Smart Phase) ---
+        alpha_quality = self._compute_alpha_quality(closed_trades)
+        
         # --- EXIT QUALITY (Phase 5) ---
         exit_quality = self._compute_exit_quality(closed_trades)
-        
-        # --- STYLE DIAGNOSTICS (Phase 6) ---
-        style_diagnostics = self._compute_style_diagnostics(closed_trades)
         
         # --- DAILY BREAKDOWN (Phase 7) ---
         daily_map = self._compute_daily_map(daily_summaries)
         
         # --- OPPORTUNITY COST (Phase 8) ---
         opp_cost = self._compute_opportunity_cost(daily_summaries, closed_trades)
+        
+        # --- COUNTERFACTUAL ANALYSIS (User Request) ---
+        ghost_pnl = sum(t.get('pnl_points', 0) for t in closed_ghosts)
+        ghost_wins = len([t for t in closed_ghosts if t.get('pnl_points', 0) > 0])
+        ghost_wr = (ghost_wins / len(closed_ghosts) * 100) if closed_ghosts else 0.0
+        
+        # --- LOSS ATTRIBUTION (v4.2) ---
+        top_losers = sorted([t for t in closed_trades if t.get('pnl_points', 0) < 0], key=lambda x: x.get('pnl_points', 0))[:5]
         
         # --- SYSTEM VERDICT (Phase 9) ---
         verdict = self._generate_verdict(exec_metrics, exit_quality, opp_cost)
@@ -62,14 +81,66 @@ class TradeReporter:
             "session_id": session_id,
             "executive_summary": exec_metrics,
             "distributions": distributions,
+            "regime_attribution": regime_stats,
+            "alpha_quality": alpha_quality,
             "exit_quality": exit_quality,
-            "style_diagnostics": style_diagnostics,
             "daily_breakdown": daily_map,
             "opportunity_cost": opp_cost,
+            "counterfactuals": {
+                "trades": len(closed_ghosts),
+                "net_pnl": ghost_pnl,
+                "win_rate": ghost_wr
+            },
+            "top_losers": top_losers,
             "verdict": verdict
         }
 
-        self._print_canonical_report(report)
+        self._print_analyst_report(report)
+        
+        # --- PHASE 10: RESEARCH STATE ENGINE (Spec-002) ---
+        if llm_client:
+            logger.info("\n🧠 [PHASE 10] GENERATING RESEARCH REPORT (Deterministic)...")
+            try:
+                # 1. Compute Research State (Deterministic Truth)
+                from enrichment.diagnostics import compute_research_state
+                from trade.models import Trade
+                
+                research_states = []
+                valid_fields = set(Trade.__annotations__.keys())
+                
+                for t_dict in raw_trades:
+                    # Filter DB columns that aren't in Model (e.g., created_at)
+                    clean_dict = {k: v for k, v in t_dict.items() if k in valid_fields}
+                    # Handle Enums conversions if needed? 
+                    # TradeStatus/ExitReason are Enums in model but strings in DB.
+                    # Dataclass might expect Enum?
+                    # Python dataclasses don't enforce type check on init, but logic might fail later.
+                    # Diagnostics uses .style (str) and .entry_time (datetime).
+                    # DB returns ISO strings for time!
+                    from datetime import datetime
+                    if isinstance(clean_dict.get('entry_time'), str):
+                        clean_dict['entry_time'] = datetime.fromisoformat(clean_dict['entry_time'])
+                    if isinstance(clean_dict.get('exit_time'), str):
+                        clean_dict['exit_time'] = datetime.fromisoformat(clean_dict['exit_time'])
+                        
+                    trade_obj = Trade(**clean_dict)
+                    r_state = compute_research_state(trade_obj)
+                    research_states.append(r_state)
+                
+                # 2. Build Payload
+                research_payload = {
+                    "session_summary": report['executive_summary'],
+                    "trades": research_states,
+                    "market_context": report.get('market_context', {})
+                }
+                
+                # 3. Call LLM (Narrator Mode)
+                research_md = llm_client.generate_research_report(research_payload)
+                logger.info("\n" + "="*80 + "\n" + research_md + "\n" + "="*80)
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to generate Research Report: {e}", exc_info=True)
+                
         return report
 
     def _compute_executive_metrics(self, trades: List[Dict]) -> Dict[str, Any]:
@@ -186,7 +257,7 @@ class TradeReporter:
 
     def _compute_opportunity_cost(self, summaries: List[DailySummary], trades: List[Dict]) -> Dict[str, Any]:
         if not summaries: 
-            return {"days_traded": 0, "participation_rate": 0, "missed_edge_cost": 0}
+            return {"days_with_edge": 0, "days_traded": 0, "days_missed": 0, "participation_rate": 0, "missed_edge_cost": 0}
             
         # Refined Edge Proxy (Phase 8): Days with high trend efficiency or significant OR range
         # OR Days where the system actually made money
@@ -205,6 +276,49 @@ class TradeReporter:
             "days_missed": days_missed,
             "missed_edge_cost": missed_edge_cost,
             "participation_rate": (days_traded / max(days_with_edge, 1) * 100)
+        }
+
+    def _compute_regime_attribution(self, trades: List[Dict]) -> List[Dict]:
+        """v4.0 Smart Attribution: Breakdown by Cluster Pairs"""
+        regimes = set(t.get('regime', 'UNK') for t in trades)
+        attribution = []
+        for reg in regimes:
+            r_trades = [t for t in trades if t.get('regime') == reg]
+            wins = [t for t in r_trades if t.get('pnl_points', 0) > 0]
+            pnl = sum(t.get('pnl_points', 0) for t in r_trades)
+            mfe = sum(t.get('mfe', 0) for t in r_trades) / len(r_trades)
+            mae = abs(sum(t.get('mae', 0) for t in r_trades) / len(r_trades))
+            
+            attribution.append({
+                "regime": reg,
+                "trades": len(r_trades),
+                "win_rate": len(wins)/len(r_trades) * 100,
+                "pnl": pnl,
+                "avg_mfe": mfe,
+                "avg_mae": mae,
+                "sharpness": (mfe / mae) if mae > 0 else mfe
+            })
+        return sorted(attribution, key=lambda x: x['pnl'], reverse=True)
+
+    def _compute_alpha_quality(self, trades: List[Dict]) -> Dict[str, Any]:
+        """v4.0 Alpha Quality: High-Alpha (Confluence) vs Fallback (Stat)"""
+        high_alpha = [t for t in trades if not t.get('metadata', {}).get('is_fallback', False)]
+        fallback = [t for t in trades if t.get('metadata', {}).get('is_fallback', False)]
+        
+        def summarize(subset):
+            if not subset: return {"trades": 0, "pnl": 0.0, "pnl_per_trade": 0.0, "wr": 0.0}
+            pnl = sum(t.get('pnl_points', 0) for t in subset)
+            wins = len([t for t in subset if t.get('pnl_points', 0) > 0])
+            return {
+                "trades": len(subset),
+                "pnl": pnl,
+                "pnl_per_trade": pnl / len(subset),
+                "wr": wins / len(subset) * 100
+            }
+
+        return {
+            "high_alpha": summarize(high_alpha),
+            "fallback": summarize(fallback)
         }
 
     def _generate_verdict(self, exec: Dict, exit_q: Dict, opp: Dict) -> Dict[str, str]:
@@ -237,75 +351,76 @@ class TradeReporter:
             "action": action
         }
 
-    def _print_canonical_report(self, report: Dict):
-        """Standard v2.8 printout"""
+    def _print_analyst_report(self, report: Dict):
+        """v4.0 Smart Analyst Layout: Data-Dense & Physics-Aware"""
         e = report['executive_summary']
         d = report['distributions']
         q = report['exit_quality']
         v = report['verdict']
+        a = report['alpha_quality']
+        
+        C_RESET = "\033[0m"
+        C_CYAN = "\033[96m"
+        C_YELLOW = "\033[93m"
+        C_GREEN = "\033[92m"
+        C_RED = "\033[91m"
+        C_DIM = "\033[2m"
 
-        logger.info(f"""
-================================================================================
-🔬 RESEARCH SESSION REPORT | {report['session_id']}
-================================================================================
+        print(f"\n{C_CYAN}" + "="*80)
+        print(f"🔬 SOVEREIGN RESEARCH REPORT v4.0 | {report['session_id']}")
+        print("="*80 + f"{C_RESET}")
 
-1. EXECUTIVE SUMMARY
---------------------------------------------------------------------------------
-Total Trades          : {e['total_trades']}
-Win Rate              : {e['win_rate']:.1f}%
-Total PnL             : {e['total_pnl_points']:+.1f} pts (₹{e['total_pnl_rupees']:+.0f})
-Profit Factor         : {e['profit_factor']:.2f}
-Expectancy            : {e['expectancy']:+.2f} pts/trade
-Max Drawdown          : {e['max_drawdown_pts']:.1f} pts
-Equity Efficiency     : {e['equity_efficiency']:.1f}%
+        print(f"\n{C_YELLOW}1. ALPHA MATURITY & QUALITY{C_RESET}")
+        print("-" * 40)
+        ha = a['high_alpha']
+        fs = a['fallback']
+        print(f"High-Alpha (Confluence) : {ha['trades']} trades | WR: {ha['wr']:.1f}% | PnL: {C_GREEN}{ha['pnl']:+.1f}{C_RESET}")
+        print(f"Stat-Fallback          : {fs['trades']} trades | WR: {fs['wr']:.1f}% | PnL: {C_GREEN if fs['pnl'] >= 0 else C_RED}{fs['pnl']:+.1f}{C_RESET}")
+        print(f"Alpha Integrity        : {C_DIM}{'CONVERGENT' if ha['pnl'] > fs['pnl'] else 'DECENTRALIZED'}{C_RESET}")
 
-2. TRADE DISTRIBUTION
---------------------------------------------------------------------------------
-By Style              : {d['style']}
-By Direction          : {d['direction']}
-By Exit Reason        : {d['exit_reason']}
+        print(f"\n{C_YELLOW}2. REGIME ATTRIBUTION (Top 5 Cluster Pairs){C_RESET}")
+        print("-" * 40)
+        print(f"{'Regime':<12} | {'Trades':<6} | {'WR':<6} | {'PnL':<8} | {'Sharpness'}")
+        for ra in report['regime_attribution'][:5]:
+            p_color = C_GREEN if ra['pnl'] > 0 else C_RED
+            print(f"{ra['regime']:<12} | {ra['trades']:<6} | {ra['win_rate']:>5.0f}% | {p_color}{ra['pnl']:>8.1f}{C_RESET} | {ra['sharpness']:.2f}")
 
-3. EXIT QUALITY (The Leak Detector)
---------------------------------------------------------------------------------
-Avg MFE (Potential)   : {q['avg_mfe']:.1f} pts
-Avg Realized Win      : {q['avg_realized_win']:.1f} pts
-Profit Giveback       : {q['profit_giveback_ratio']:.1f}%  {'⚠️ HIGH' if q['profit_giveback_ratio'] > 50 else '✅ CLEAN'}
-Exit Efficiency       : {q['exit_efficiency_score']:.1f}%
+        print(f"\n{C_RED}3. LOSS ATTRIBUTION (Top 5 Failures){C_RESET}")
+        print("-" * 40)
+        print(f"{'Trade ID':<20} | {'Regime':<10} | {'Reason':<12} | {'PnL'}")
+        for lt in report['top_losers']:
+            # Shorten trade ID for display
+            short_id = lt['trade_id'].split('_')[-2:]
+            short_id = "_".join(short_id)
+            print(f"{short_id:<20} | {lt['regime']:<10} | {lt['exit_reason']:<12} | {C_RED}{lt['pnl_points']:>8.1f}{C_RESET}")
 
-4. STYLE DIAGNOSTICS
---------------------------------------------------------------------------------
-""")
-        for sd in report['style_diagnostics']:
-            logger.info(f"[{sd['style']}] {sd['trades']} trades | {sd['win_rate']:.0f}% WR | PnL: {sd['net_pnl']:+.1f}")
-            logger.info(f"   TGT Hit: {sd['target_hit_rate']:.0f}% | SL Hit: {sd['stop_hit_rate']:.0f}% | Hold: {sd['avg_hold_time']:.1f} bars")
-            logger.info(f"   MFE: {sd['avg_mfe']:.1f} | MAE: {sd['avg_mae']:.1f}")
-            logger.info(f"   Conclusion: {sd['conclusion']}")
+        print(f"\n{C_YELLOW}4. EXECUTIVE PHYSICS SUMMARY{C_RESET}")
+        print("-" * 40)
+        pnl_color = C_GREEN if e['total_pnl_points'] > 0 else C_RED
+        rupee_color = C_GREEN if e['total_pnl_rupees'] > 0 else C_RED
+        print(f"Net PnL (Points)      : {pnl_color}{e['total_pnl_points']:+.1f} pts{C_RESET}")
+        print(f"Net PnL (Rupees)      : {rupee_color}₹{e['total_pnl_rupees']:+,.0f}{C_RESET}")
+        print(f"Profit Factor         : {e['profit_factor']:.2f}")
+        print(f"Win Rate              : {e['win_rate']:.1f}%")
+        print(f"Max Drawdown          : {C_RED}{e['max_drawdown_pts']:.1f} pts{C_RESET}")
 
-        logger.info(f"""
-5. DAILY BREAKDOWN
---------------------------------------------------------------------------------
-""")
-        for s in report['daily_breakdown']:
-            logger.info(f"  {s['date']} | {s['trades']} trades | PnL: {s['pnl']:+.1f} | MaxDD: {s['max_dd']:.1f}")
+        print(f"\n{C_YELLOW}5. EXIT QUALITY & LEAKAGE{C_RESET}")
+        print("-" * 40)
+        giveback_color = C_RED if q['profit_giveback_ratio'] > 50 else C_GREEN
+        print(f"Avg MFE (Potential)   : {q['avg_mfe']:.1f} pts")
+        print(f"Avg Realized Win      : {q['avg_realized_win']:.1f} pts")
+        print(f"Profit Giveback       : {giveback_color}{q['profit_giveback_ratio']:.1f}%{C_RESET}")
+        print(f"Exit Efficacy         : {q['exit_efficiency_score']:.1f}%")
 
         o = report['opportunity_cost']
-        logger.info(f"""
-6. OPPORTUNITY COST
---------------------------------------------------------------------------------
-Days with Edge        : {o['days_with_edge']}
-Days Traded           : {o['days_traded']}
-Days Missed           : {o['days_missed']}
-Missed Edge Cost      : {o['missed_edge_cost']:+.1f} pts
-Participation Rate    : {o['participation_rate']:.1f}%
+        print(f"\n{C_YELLOW}6. SYSTEM VITALITY & VERDICT{C_RESET}")
+        print("-" * 40)
+        print(f"Participation Rate    : {o['participation_rate']:.1f}%")
+        print(f"System Health         : {C_CYAN}{v['status']}{C_RESET}")
+        print(f"Diagnosis             : {v['primary']}")
+        print(f"Prescription          : {C_YELLOW}{v['action']}{C_RESET}")
 
-7. SYSTEM VERDICT
---------------------------------------------------------------------------------
-STATUS                : {v['status']}
-Primary Issue         : {v['primary']}
-Action Plan           : {v['action']}
-
-================================================================================
-""")
+        print(f"\n{C_CYAN}" + "="*80 + f"{C_RESET}\n")
 
 # Global instance
 trade_reporter = TradeReporter()

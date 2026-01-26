@@ -1,0 +1,99 @@
+# policy_table_v1.yaml
+# The "Source of Truth" for permissible actions based on 5-Year Recalibration.
+# Clusters: 1, 11 (Alpha) | 6, 2 (Selective) | 4, 10 (Trap) | Others (Scalp/MR)
+
+regimes:
+  # --- ALPHA REGIMES (Proven Winners) ---
+  1:
+    description: "High Alpha Put Regime (WR 83.5%)."
+    default:
+      allowed_actions: ["ALL"]
+      max_risk_multiplier: 1.5
+      positioning_mode: "AGGRESSIVE"
+      notes: "Prioritize Puts/Shorts. High Alpha detected."
+
+  11:
+    description: "High Alpha Call Regime (WR 72.9%)."
+    default:
+      allowed_actions: ["ALL"]
+      max_risk_multiplier: 1.5
+      positioning_mode: "AGGRESSIVE"
+      notes: "Prioritize Calls/Longs. High Alpha detected."
+
+  # --- SELECTIVE REGIMES (Positive Expectancy) ---
+  6:
+    description: "Selective Put Regime (WR 71.3%)."
+    default:
+      allowed_actions: ["TREND_FOLLOWING", "PULLBACK"]
+      max_risk_multiplier: 1.0
+      positioning_mode: "SELECTIVE"
+      notes: "Solid expectancy for shorts."
+
+  2:
+    description: "Selective Call Regime (WR 61.4%)."
+    default:
+      allowed_actions: ["TREND_FOLLOWING", "PULLBACK"]
+      max_risk_multiplier: 1.0
+      positioning_mode: "SELECTIVE"
+      notes: "Solid expectancy for longs."
+
+  # --- TRAP REGIMES (Noise/Choppy) ---
+  4:
+    description: "The Grand Trap (High Volume Noise)."
+    default:
+      allowed_actions: ["NONE"]
+      max_risk_multiplier: 0.0
+      positioning_mode: "HARD_BLOCK"
+      notes: "Massive sample size (37k) with erratic PnL. Avoid."
+
+  10:
+    description: "Noise Cluster (Low Clarity)."
+    default:
+      allowed_actions: ["NONE"]
+      max_risk_multiplier: 0.0
+      positioning_mode: "HARD_BLOCK"
+      notes: "Indeterminate edge. Observation only."
+
+  # --- NEUTRAL / DEFENSIVE REGIMES ---
+  0:
+    description: "Neutral Low Vol."
+    default:
+      allowed_actions: ["MEAN_REVERSION"]
+      max_risk_multiplier: 0.5
+      positioning_mode: "NEUTRAL"
+      notes: "Scalping only."
+
+  3:
+    description: "Slight Positive Drift."
+    default:
+      allowed_actions: ["MEAN_REVERSION"]
+      max_risk_multiplier: 0.5
+      positioning_mode: "NEUTRAL"
+
+  5:
+    description: "Rotational Regime."
+    default:
+      allowed_actions: ["SCALP"]
+      max_risk_multiplier: 0.25
+      positioning_mode: "DEFENSIVE"
+
+  7:
+    description: "Mean Reversion Zone."
+    default:
+      allowed_actions: ["MEAN_REVERSION"]
+      max_risk_multiplier: 0.5
+      positioning_mode: "NEUTRAL"
+
+  8:
+    description: "Slight Positive Drag."
+    default:
+      allowed_actions: ["SCALP"]
+      max_risk_multiplier: 0.25
+      positioning_mode: "DEFENSIVE"
+
+  9:
+    description: "Neutral Drift."
+    default:
+      allowed_actions: ["MEAN_REVERSION"]
+      max_risk_multiplier: 0.5
+      positioning_mode: "NEUTRAL"

@@ -1,0 +1,99 @@
+# Beast Engine: System Overview & Implementation Guide
+
+## 1. System Philosophy & Architecture
+
+The "Beast" is a Hybrid Trading Engine that splits responsibility between an **LLM BRAIN** (Strategy, Context, Qualitative Analysis) and a **DETERMINISTIC EXECUTOR** (Risk, Math, Exact Timing).
+
+### The Authority Split
+This is the single most important concept.
+*   **The Brain (LLM)**: Analyzes [micro_context](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/enrichment.py#118-338), `volatility`, and `structure`. It *suggests* an action (e.g., "BUY_CALL") and a *Style* (e.g., "REMR").
+    *   *Source*: [brain/llm_client.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/brain/llm_client.py) (Tactical Logic), [brain/prompts.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/brain/prompts.py) (Instructions).
+*   **The Executor (Algorithm)**: Receives the specific Action + Style. It **IGNORES** the LLM's suggested Stop Loss/Target and **ENFORCES** hard-coded geometric rules defined by the Style.
+    *   *Source*: [hot_path/executor.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py) ([_apply_style_geometry](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py#85-124) method).
+
+## 2. Core Components
+
+### A. The Brain (`brain/`)
+*   **[llm_client.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/temp_llm_client.py)**: Handles the prompt engineering loop. *Crucially*, it injects authoritative data (like `max_hold_minutes`) into the LLM's output dictionary to ensure the Executor receives correct params even if the LLM hallucinates.
+*   **[prompts.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/fix_prompts.py)**: Contains the sacred texts (System Prompts). If you change logic, you MUST update the prompt to tell the LLM about it, or it will hallucinate.
+
+### B. The Engine ([engine/](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine))
+*   **[enrichment.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/enrichment.py)**: The "Physics Engine". It defines **Context** (Trend vs Chop), **Style Economics** (min PnL reqs), and **micro_confidence** rules.
+    *   *Critical Data*: `STYLE_ECONOMICS` dict defines `max_hold_minute` and `min_pnl`.
+*   **[gateway.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/gateway.py)**: The CLI entry point. Handles Date parsing and Mode switching (Backtest vs Live).
+*   **[modes/backtest.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/modes/backtest.py)**: The Simulation Loop. It mimics the Live Engine but injects historical data.
+
+### C. The Executor ([hot_path/executor.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py))
+*   **[HotPathExecutor](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py#36-986)**: The state machine.
+    *   **[_enter_trade](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py#761-796)**: Freezes the trade params (SL/Target/Style) at the moment of entry.
+    *   **[process_tick](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py#551-760)**: Checks for Stops, Targets, and Re-entry signals.
+    *   **[square_off](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py#936-986)**: Handles PnL realization and logging.
+
+### D. Data Logic ([data/database.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/data/database.py))
+*   **[fetch_context_data](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/data/database.py#180-417)**: Retrieves historical candles. *Warning*: Needs sufficient context (LIMIT 60+) to calculate Moving Averages correctly.
+
+---
+
+## 3. Key Workflows
+
+### A. The Tactical Loop
+1.  **Tick Arrives** -> [backtest.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/monitor_backtest.py) / [live_engine.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/live_engine.py)
+2.  **Trigger Check** -> Every 15 mins (or event-based).
+3.  **Brain Call** -> `llm_client.get_tactical_update()`
+    *   LLM receives Market Data + Style Matrix.
+    *   LLM outputs JSON: `{"action": "BUY_CALL", "selected_style": "REMR"}`.
+4.  **Injection** -> [llm_client.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/temp_llm_client.py) injects `max_hold_minutes` from [enrichment.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/enrichment.py).
+5.  **Execution** -> `executor.update_instructions()` -> `executor._apply_style_geometry()`.
+    *   Executor overwrites LLM parameters with `STYLE_PARAMS` (e.g. SL 50 / TGT 100 for REMR).
+
+### B. Style Transition & Monitor
+1.  **Transition**: If `unrealized_pnl > 0.6 * ExpectedMove`, logic inside [manage_position](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py#797-995) (executor.py) upgrades a trade from REMR to ITC (Trend Following), expanding targets.
+2.  **Re-entry**: If a REMR trade hits Fixed Target (100 pts) *before* transition, the Executor sets a `remr_continuation_monitor`. If price later continues to break out, it **auto-re-enters** as ITC.
+
+---
+
+## 4. Top 5 Developer Pitfalls (WARNINGS)
+
+### 1. The "Open Position" State Freeze
+*   **The Mistake**: assuming changing [instructions](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py#271-549) or `STYLE_PARAMS` will affect an *active* trade immediately.
+*   **The Reality**: `open_position` metadata is created **once** at entry ([_enter_trade](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py#761-796)). If you change the `max_hold_time` in [enrichment.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/enrichment.py) while a trade is running, the trade will still use the value stored in `pos['max_hold_minutes']`.
+*   **Fix**: You must manually update `self.open_position` attributes if you want mid-trade logic changes to apply.
+
+### 2. Name Mismatches (Short Codes vs Long Names)
+*   **The Mistake**: LLM outputs `"REMR"` but [enrichment.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/enrichment.py) dict implies `"RANGE_EXTREME_MEAN_REVERSION"`. Result: KeyErrors or default fallbacks (e.g., getting 20 min hold instead of 80 min).
+*   **The Reality**: The LLM prefers short tokens. The Python dicts often use long semantic keys.
+*   **Fix**: Always ensure mappings exist in [enrichment.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/engine/enrichment.py) (e.g., `"REMR": "RANGE_..."`) or normalize inputs in [llm_client.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/temp_llm_client.py).
+
+### 3. Authority Split "Silent Overrides"
+*   **The Mistake**: Tuning the LLM prompt to suggest "tighter stops" and wondering why the trade still uses stable 50pt stops.
+*   **The Reality**: `executor._apply_style_geometry()` **unconditionally overwrites** `sl` and `target` based on the Style.
+*   **Fix**: Modify `STYLE_PARAMS` in [executor.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/hot_path/executor.py) to change trade geometry, not the Prompt.
+
+### 4. Database Context Limits
+*   **The Mistake**: Reducing `LIMIT` in SQL queries to optimize speed.
+*   **The Reality**: Indicators like MA50 or ATR require previous data. If you fetch only the last 15 candles, the MA50 calculation returns `NaN`, leading to `NEUTRAL` bias and zero trades (The "Jan 12 Regression").
+*   **Fix**: Always verify [fetch_context_data](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/data/database.py#180-417) requests enough history (at least 60+ bars).
+
+### 5. Counterfactual Logic Drift
+*   **The Mistake**: Changing the Live Engine logic (e.g. upgrading Targets to 100pts) but failing to update [counterfactual_truth.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/counterfactual_truth.py).
+*   **The Reality**: The Counterfactual report claims you "Saved Money" by blocking trades because it's still checking for tiny 30pt scalps, while your new strategy aims for 100pt swings.
+*   **Fix**: Treat [counterfactual_truth.py](file://wsl.localhost/Ubuntu-24.04/home/beast/projects/stock-ai-beast/counterfactual_truth.py) as a Unit Test. Update its heuristics whenever you change the core Strategy params.
+
+---
+
+## 5. Database Architecture & Data Epistemology (v2.8.3)
+
+### A. The "Gold" Source
+*   **Location**: `stock-ai-beast/data/trading.db`
+*   **Role**: All NIFTY history (2023-2026).
+*   **⚠️ CRITICAL**: **DELETE root-level `stock-ai-beast/trading.db`**. It is a ghost file containing only empty schemas.
+
+### B. Atlas Learning Datasets
+Research data is partitioned for zero leakage:
+1.  **`atlas/data/market_states.parquet` (The X)**: State features + Logical hooks.
+2.  **`atlas/data/outcomes.parquet` (The y)**: Aligned trade responses.
+*   **Join Key**: Deterministic `trade_id`.
+*   **Sorting**: Chronologically sorted across the entire 741-day series.
+
+### C. Cleanup Protocol
+*   Purge all `.db` files in the root `/projects/` folder (e.g., `duck_temp.db`, `watch_copy.db`). They are transient migration scaffolds.
