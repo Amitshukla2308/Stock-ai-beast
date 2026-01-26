@@ -71,6 +71,10 @@ class TraceLogger:
         except Exception as e:
             logger.error(f"Failed to persist trace log: {e}")
 
+    def flush(self):
+        """No-op for back compatibility"""
+        pass
+
 
 # Global Instance (Backtest/Live modes should override session_id)
 trace_logger = TraceLogger()

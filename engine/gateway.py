@@ -104,11 +104,12 @@ def get_engine(mode, args=None):
                 initial_balance=args.balance if args else 30000
             )
         except Exception as e:
-            # Emit Error Status
+            # Emit Warning Status
             err_msg = str(e).replace('"', "'")
-            emit_telegram_signal("STATUS", {"msg": f"❌ Prefill Failed: {err_msg}"})
-            logging.error(f"❌ Critical Prefill Error: {e}")
-            raise e # CRITICAL: Stop execution if prefill fails
+            emit_telegram_signal("STATUS", {"msg": f"⚠️ Prefill Warning: {err_msg}"})
+            logging.warning(f"⚠️ Prefill failed (Simulation will proceed with existing data): {e}")
+            if mode != 'backtest':
+                raise e # CRITICAL for Live/Mock, but Non-Fatal for Backtest
         
     elif mode == 'mock':
         from engine.modes.live import LiveMode
