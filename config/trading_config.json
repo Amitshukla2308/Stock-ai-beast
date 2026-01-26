@@ -6,6 +6,8 @@
     },
     "GLOBAL": {
         "ALLOW_ROTATIONAL_EXECUTION": true,
+        "NIFTY_LOT_SIZE": 65,
+        "OPTIONS_DELTA": 0.55,
         "COOLING_PERIOD": [
             "10:00",
             "10:15"

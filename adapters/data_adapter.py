@@ -38,7 +38,24 @@ class DataAdapter:
         """
         try:
             conn = get_connection()
+            # print(f"   [DB] Querying: {query}")
             df = pd.read_sql_query(query, conn)
+            
+            if df.empty:
+                print(f"   [DB] ⚠️ No data found for {full_symbol} on {date_str} in {table_name}")
+                # Diagnostic: What symbols DO exist?
+                try:
+                    sym_query = f"SELECT DISTINCT symbol FROM {table_name}"
+                    available_syms = pd.read_sql_query(sym_query, conn)
+                    sym_list = available_syms['symbol'].tolist()
+                    print(f"   [DB] ℹ️ Symbols in {table_name}: {len(sym_list)} total")
+                    for s in sym_list[:20]: # Show first 20
+                        print(f"      - {s}")
+                except Exception as e:
+                    print(f"   [DB] ❌ Diagnostic query failed: {e}")
+            else:
+                print(f"   [DB] ✅ Found {len(df)} candles for {full_symbol}")
+            
             conn.close()
             
             if not df.empty:
@@ -65,26 +82,27 @@ class DataAdapter:
         prev_day_str = prev_day.strftime('%Y-%m-%d')
         full_symbol = get_fyers_symbol(symbol)
         
-        # We rely on 1min data for precise close, even if running 5min backtest
-        # Fallback logic not originally present, keeping simple
-        query = f"""
-            SELECT close FROM candles_1min 
-            WHERE symbol = '{full_symbol}'
-              AND timestamp >= '{prev_day_str} 09:45:00' 
-              AND timestamp <= '{prev_day_str} 10:00:00'
-            ORDER BY timestamp DESC LIMIT 1
-        """
-        try:
-            conn = get_connection()
-            result = conn.execute(query).fetchone()
-            conn.close()
-            
-            if result:
-                return result[0]
-            return None
-        except Exception as e:
-            logger.error(f"Prev Close Fetch Error: {e}")
-            return None
+        # Try candles_5min first if that's the requested resolution, or as fallback
+        tables = ["candles_5min", "candles_1min"]
+        
+        last_result = None
+        for table in tables:
+            query = f"""
+                SELECT close FROM {table} 
+                WHERE symbol = '{full_symbol}'
+                  AND timestamp >= '{prev_day_str} 09:30:00' 
+                  AND timestamp <= '{prev_day_str} 10:00:00'
+                ORDER BY timestamp DESC LIMIT 1
+            """
+            try:
+                conn = get_connection()
+                result = conn.execute(query).fetchone()
+                conn.close()
+                if result:
+                    return result[0]
+            except:
+                continue
+        return None
 
 # Global instance
 data_adapter = DataAdapter()

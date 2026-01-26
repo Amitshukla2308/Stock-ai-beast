@@ -1,0 +1,230 @@
+{
+  "0": {
+    "probability": 0.2011,
+    "count": 18695,
+    "avg_mfe": 25.65,
+    "avg_mae": 26.43,
+    "avg_return": 0.4955,
+    "centroid": {
+      "latent_1": -0.21,
+      "latent_2": 0.0,
+      "latent_3": 0.55,
+      "latent_4": -0.65,
+      "latent_5": 0.54,
+      "latent_6": -0.37,
+      "latent_7": 0.0,
+      "latent_8": 0.0,
+      "latent_9": -0.7,
+      "latent_10": 0.02
+    }
+  },
+  "1": {
+    "probability": 0.0825,
+    "count": 7673,
+    "avg_mfe": 28.98,
+    "avg_mae": 29.11,
+    "avg_return": 1.3648,
+    "centroid": {
+      "latent_1": -0.22,
+      "latent_2": 0.42,
+      "latent_3": 0.61,
+      "latent_4": 0.67,
+      "latent_5": 0.7,
+      "latent_6": 0.63,
+      "latent_7": 0.59,
+      "latent_8": -0.44,
+      "latent_9": 0.56,
+      "latent_10": 0.19
+    }
+  },
+  "2": {
+    "probability": 0.0986,
+    "count": 9163,
+    "avg_mfe": 26.81,
+    "avg_mae": 27.45,
+    "avg_return": 0.9248,
+    "centroid": {
+      "latent_1": -0.2,
+      "latent_2": 0.0,
+      "latent_3": 0.61,
+      "latent_4": -0.73,
+      "latent_5": 0.56,
+      "latent_6": -0.42,
+      "latent_7": 0.21,
+      "latent_8": -0.16,
+      "latent_9": -0.66,
+      "latent_10": -0.19
+    }
+  },
+  "3": {
+    "probability": 0.111,
+    "count": 10318,
+    "avg_mfe": 25.54,
+    "avg_mae": 26.79,
+    "avg_return": -0.1088,
+    "centroid": {
+      "latent_1": -0.21,
+      "latent_2": 0.0,
+      "latent_3": 0.67,
+      "latent_4": -0.73,
+      "latent_5": 0.63,
+      "latent_6": -0.32,
+      "latent_7": 0.47,
+      "latent_8": -0.39,
+      "latent_9": 0.63,
+      "latent_10": -0.07
+    }
+  },
+  "4": {
+    "probability": 0.0398,
+    "count": 3704,
+    "avg_mfe": 26.75,
+    "avg_mae": 27.3,
+    "avg_return": 0.0715,
+    "centroid": {
+      "latent_1": -0.5,
+      "latent_2": 0.0,
+      "latent_3": 0.59,
+      "latent_4": -0.77,
+      "latent_5": 0.26,
+      "latent_6": -0.52,
+      "latent_7": 0.34,
+      "latent_8": -0.17,
+      "latent_9": -0.68,
+      "latent_10": -0.34
+    }
+  },
+  "5": {
+    "probability": 0.033,
+    "count": 3065,
+    "avg_mfe": 29.32,
+    "avg_mae": 29.62,
+    "avg_return": 1.8391,
+    "centroid": {
+      "latent_1": -0.01,
+      "latent_2": 0.16,
+      "latent_3": 0.65,
+      "latent_4": 0.67,
+      "latent_5": 0.65,
+      "latent_6": 0.52,
+      "latent_7": 0.86,
+      "latent_8": -0.03,
+      "latent_9": 0.5,
+      "latent_10": 0.19
+    }
+  },
+  "6": {
+    "probability": 0.042,
+    "count": 3902,
+    "avg_mfe": 28.52,
+    "avg_mae": 30.36,
+    "avg_return": -0.0838,
+    "centroid": {
+      "latent_1": 0.0,
+      "latent_2": -0.34,
+      "latent_3": 0.59,
+      "latent_4": -0.07,
+      "latent_5": 0.35,
+      "latent_6": -0.07,
+      "latent_7": 0.51,
+      "latent_8": -0.14,
+      "latent_9": 0.26,
+      "latent_10": 0.06
+    }
+  },
+  "7": {
+    "probability": 0.15,
+    "count": 13948,
+    "avg_mfe": 27.99,
+    "avg_mae": 28.54,
+    "avg_return": 0.8702,
+    "centroid": {
+      "latent_1": -0.17,
+      "latent_2": 0.0,
+      "latent_3": 0.56,
+      "latent_4": 0.58,
+      "latent_5": 0.71,
+      "latent_6": 0.09,
+      "latent_7": 0.48,
+      "latent_8": -0.33,
+      "latent_9": 0.6,
+      "latent_10": 0.37
+    }
+  },
+  "8": {
+    "probability": 0.0985,
+    "count": 9153,
+    "avg_mfe": 28.86,
+    "avg_mae": 29.3,
+    "avg_return": 1.173,
+    "centroid": {
+      "latent_1": 0.09,
+      "latent_2": -0.37,
+      "latent_3": 0.65,
+      "latent_4": -0.73,
+      "latent_5": 0.59,
+      "latent_6": -0.06,
+      "latent_7": 0.55,
+      "latent_8": -0.48,
+      "latent_9": 0.54,
+      "latent_10": -0.26
+    }
+  },
+  "9": {
+    "probability": 0.07,
+    "count": 6506,
+    "avg_mfe": 26.19,
+    "avg_mae": 26.43,
+    "avg_return": 1.0842,
+    "centroid": {
+      "latent_1": -0.25,
+      "latent_2": 0.0,
+      "latent_3": 0.83,
+      "latent_4": -0.83,
+      "latent_5": 0.63,
+      "latent_6": -0.4,
+      "latent_7": 0.31,
+      "latent_8": -0.3,
+      "latent_9": -0.62,
+      "latent_10": -0.28
+    }
+  },
+  "10": {
+    "probability": 0.0378,
+    "count": 3517,
+    "avg_mfe": 27.39,
+    "avg_mae": 28.37,
+    "avg_return": 0.3341,
+    "centroid": {
+      "latent_1": -0.04,
+      "latent_2": -0.45,
+      "latent_3": 0.74,
+      "latent_4": -0.75,
+      "latent_5": 0.54,
+      "latent_6": -0.44,
+      "latent_7": 0.19,
+      "latent_8": -0.16,
+      "latent_9": -0.68,
+      "latent_10": -0.32
+    }
+  },
+  "11": {
+    "probability": 0.0357,
+    "count": 3317,
+    "avg_mfe": 29.28,
+    "avg_mae": 31.6,
+    "avg_return": 0.0854,
+    "centroid": {
+      "latent_1": -0.51,
+      "latent_2": -0.67,
+      "latent_3": 0.56,
+      "latent_4": -0.8,
+      "latent_5": -0.6,
+      "latent_6": -0.45,
+      "latent_7": 0.39,
+      "latent_8": -0.08,
+      "latent_9": -0.69,
+      "latent_10": -0.46
+    }
+  }
+}

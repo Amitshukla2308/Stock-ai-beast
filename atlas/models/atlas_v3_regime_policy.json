@@ -1,0 +1,578 @@
+{
+  "0": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 49,
+      "tgt": 38,
+      "size_factor": 1.0
+    }
+  },
+  "1": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+5.8 | WR 0.60",
+    "risk_params": {
+      "sl": 36,
+      "tgt": 36,
+      "size_factor": 1.0
+    }
+  },
+  "2": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE36/MAE38) | Low Dir",
+    "risk_params": {
+      "sl": 40,
+      "tgt": 33,
+      "size_factor": 1.0
+    }
+  },
+  "3": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE41/MAE43) | Low Dir",
+    "risk_params": {
+      "sl": 44,
+      "tgt": 38,
+      "size_factor": 1.0
+    }
+  },
+  "4": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 50,
+      "tgt": 40,
+      "size_factor": 1.0
+    }
+  },
+  "5": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 52,
+      "tgt": 47,
+      "size_factor": 1.0
+    }
+  },
+  "6": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE37/MAE40) | Low Dir",
+    "risk_params": {
+      "sl": 42,
+      "tgt": 35,
+      "size_factor": 1.0
+    }
+  },
+  "7": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 49,
+      "tgt": 38,
+      "size_factor": 1.0
+    }
+  },
+  "8": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE38/MAE41) | Low Dir",
+    "risk_params": {
+      "sl": 43,
+      "tgt": 36,
+      "size_factor": 1.0
+    }
+  },
+  "9": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+4.8 | WR 0.55",
+    "risk_params": {
+      "sl": 42,
+      "tgt": 42,
+      "size_factor": 1.0
+    }
+  },
+  "10": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+3.6 | WR 0.57",
+    "risk_params": {
+      "sl": 39,
+      "tgt": 36,
+      "size_factor": 1.0
+    }
+  },
+  "11": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE28/MAE32) | Low Dir",
+    "risk_params": {
+      "sl": 34,
+      "tgt": 25,
+      "size_factor": 1.0
+    }
+  },
+  "12": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 39,
+      "tgt": 38,
+      "size_factor": 1.0
+    }
+  },
+  "13": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+4.1 | WR 0.55",
+    "risk_params": {
+      "sl": 41,
+      "tgt": 41,
+      "size_factor": 1.0
+    }
+  },
+  "14": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+5.3 | WR 0.55",
+    "risk_params": {
+      "sl": 34,
+      "tgt": 33,
+      "size_factor": 1.0
+    }
+  },
+  "15": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 42,
+      "tgt": 38,
+      "size_factor": 1.0
+    }
+  },
+  "16": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+7.7 | WR 0.58",
+    "risk_params": {
+      "sl": 31,
+      "tgt": 34,
+      "size_factor": 1.0
+    }
+  },
+  "17": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE43/MAE48) | Low Dir",
+    "risk_params": {
+      "sl": 49,
+      "tgt": 41,
+      "size_factor": 1.0
+    }
+  },
+  "18": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE46/MAE46) | Low Dir",
+    "risk_params": {
+      "sl": 48,
+      "tgt": 43,
+      "size_factor": 1.0
+    }
+  },
+  "19": {
+    "action": "SHORT_ONLY",
+    "reason": "Exp-7.9 | WR 0.56",
+    "risk_params": {
+      "sl": 49,
+      "tgt": 35,
+      "size_factor": 1.0
+    }
+  },
+  "20": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+2.5 | WR 0.54",
+    "risk_params": {
+      "sl": 31,
+      "tgt": 25,
+      "size_factor": 1.0
+    }
+  },
+  "21": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 37,
+      "tgt": 24,
+      "size_factor": 1.0
+    }
+  },
+  "22": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 53,
+      "tgt": 43,
+      "size_factor": 1.0
+    }
+  },
+  "23": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 41,
+      "tgt": 40,
+      "size_factor": 1.0
+    }
+  },
+  "24": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+8.2 | WR 0.60",
+    "risk_params": {
+      "sl": 39,
+      "tgt": 43,
+      "size_factor": 1.0
+    }
+  },
+  "25": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+5.8 | WR 0.56",
+    "risk_params": {
+      "sl": 39,
+      "tgt": 39,
+      "size_factor": 1.0
+    }
+  },
+  "26": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE46/MAE51) | Low Dir",
+    "risk_params": {
+      "sl": 52,
+      "tgt": 44,
+      "size_factor": 1.0
+    }
+  },
+  "27": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE41/MAE43) | Low Dir",
+    "risk_params": {
+      "sl": 45,
+      "tgt": 39,
+      "size_factor": 1.0
+    }
+  },
+  "28": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 38,
+      "tgt": 35,
+      "size_factor": 1.0
+    }
+  },
+  "29": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 51,
+      "tgt": 39,
+      "size_factor": 1.0
+    }
+  },
+  "30": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE39/MAE44) | Low Dir",
+    "risk_params": {
+      "sl": 45,
+      "tgt": 37,
+      "size_factor": 1.0
+    }
+  },
+  "31": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE48/MAE50) | Low Dir",
+    "risk_params": {
+      "sl": 52,
+      "tgt": 46,
+      "size_factor": 1.0
+    }
+  },
+  "32": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+2.6 | WR 0.54",
+    "risk_params": {
+      "sl": 29,
+      "tgt": 24,
+      "size_factor": 1.0
+    }
+  },
+  "33": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+5.0 | WR 0.54",
+    "risk_params": {
+      "sl": 40,
+      "tgt": 39,
+      "size_factor": 1.0
+    }
+  },
+  "34": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+4.4 | WR 0.54",
+    "risk_params": {
+      "sl": 37,
+      "tgt": 33,
+      "size_factor": 1.0
+    }
+  },
+  "35": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE33/MAE36) | Low Dir",
+    "risk_params": {
+      "sl": 37,
+      "tgt": 31,
+      "size_factor": 1.0
+    }
+  },
+  "36": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE42/MAE44) | Low Dir",
+    "risk_params": {
+      "sl": 45,
+      "tgt": 40,
+      "size_factor": 1.0
+    }
+  },
+  "37": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE37/MAE41) | Low Dir",
+    "risk_params": {
+      "sl": 43,
+      "tgt": 34,
+      "size_factor": 1.0
+    }
+  },
+  "38": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+2.8 | WR 0.55",
+    "risk_params": {
+      "sl": 37,
+      "tgt": 32,
+      "size_factor": 1.0
+    }
+  },
+  "39": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE44/MAE44) | Low Dir",
+    "risk_params": {
+      "sl": 46,
+      "tgt": 42,
+      "size_factor": 1.0
+    }
+  },
+  "40": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE26/MAE29) | Low Dir",
+    "risk_params": {
+      "sl": 31,
+      "tgt": 24,
+      "size_factor": 1.0
+    }
+  },
+  "41": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+9.7 | WR 0.60",
+    "risk_params": {
+      "sl": 38,
+      "tgt": 41,
+      "size_factor": 1.0
+    }
+  },
+  "42": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 53,
+      "tgt": 39,
+      "size_factor": 1.0
+    }
+  },
+  "43": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 46,
+      "tgt": 41,
+      "size_factor": 1.0
+    }
+  },
+  "44": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 37,
+      "tgt": 41,
+      "size_factor": 1.0
+    }
+  },
+  "45": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+4.0 | WR 0.53",
+    "risk_params": {
+      "sl": 39,
+      "tgt": 39,
+      "size_factor": 1.0
+    }
+  },
+  "46": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE38/MAE40) | Low Dir",
+    "risk_params": {
+      "sl": 41,
+      "tgt": 35,
+      "size_factor": 1.0
+    }
+  },
+  "47": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE39/MAE41) | Low Dir",
+    "risk_params": {
+      "sl": 43,
+      "tgt": 36,
+      "size_factor": 1.0
+    }
+  },
+  "48": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE44/MAE44) | Low Dir",
+    "risk_params": {
+      "sl": 46,
+      "tgt": 41,
+      "size_factor": 1.0
+    }
+  },
+  "49": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE36/MAE41) | Low Dir",
+    "risk_params": {
+      "sl": 42,
+      "tgt": 33,
+      "size_factor": 1.0
+    }
+  },
+  "50": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 41,
+      "tgt": 29,
+      "size_factor": 1.0
+    }
+  },
+  "51": {
+    "action": "SCALP",
+    "reason": "High Vol (MFE42/MAE45) | Low Dir",
+    "risk_params": {
+      "sl": 46,
+      "tgt": 40,
+      "size_factor": 1.0
+    }
+  },
+  "52": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 41,
+      "tgt": 41,
+      "size_factor": 1.0
+    }
+  },
+  "53": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 49,
+      "tgt": 37,
+      "size_factor": 1.0
+    }
+  },
+  "54": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 41,
+      "tgt": 32,
+      "size_factor": 1.0
+    }
+  },
+  "55": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 51,
+      "tgt": 35,
+      "size_factor": 1.0
+    }
+  },
+  "56": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+4.3 | WR 0.54",
+    "risk_params": {
+      "sl": 39,
+      "tgt": 38,
+      "size_factor": 1.0
+    }
+  },
+  "57": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 40,
+      "tgt": 37,
+      "size_factor": 1.0
+    }
+  },
+  "58": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+7.0 | WR 0.56",
+    "risk_params": {
+      "sl": 34,
+      "tgt": 36,
+      "size_factor": 1.0
+    }
+  },
+  "59": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+6.7 | WR 0.57",
+    "risk_params": {
+      "sl": 40,
+      "tgt": 42,
+      "size_factor": 1.0
+    }
+  },
+  "60": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 51,
+      "tgt": 38,
+      "size_factor": 1.0
+    }
+  },
+  "61": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 53,
+      "tgt": 41,
+      "size_factor": 1.0
+    }
+  },
+  "62": {
+    "action": "NO_TRADE",
+    "reason": "Low Edge",
+    "risk_params": {
+      "sl": 39,
+      "tgt": 34,
+      "size_factor": 1.0
+    }
+  },
+  "63": {
+    "action": "LONG_ONLY",
+    "reason": "Exp+8.1 | WR 0.60",
+    "risk_params": {
+      "sl": 30,
+      "tgt": 33,
+      "size_factor": 1.0
+    }
+  }
+}
