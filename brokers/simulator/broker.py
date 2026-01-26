@@ -75,5 +75,24 @@ class SimBroker(BaseBroker):
     def get_balance(self):
         return self.balance
 
+    def update_balance(self, amount: float):
+        """
+        External balance update (e.g. from TradeLifecycle).
+        """
+        self.balance += amount
+        self.balance_history.append({
+            'timestamp': None, # Timestamp usually handled by caller or context
+            'balance': self.balance,
+            'pnl_rupees': amount,
+            'source': 'EXTERNAL_UPDATE'
+        })
+        
+        if self.balance < self.margin_required:
+            self.wipeout_count += 1
+            injection = self.initial_balance - self.balance
+            self.total_deposited += injection
+            self.balance = self.initial_balance
+            print(f"      💀 [SimBroker] WIPEOUT! Injected ₹{injection:.0f}")
+
     def process_tick(self, tick):
         pass
