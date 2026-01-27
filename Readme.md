@@ -1,45 +1,65 @@
-# 🐉 Stock AI Beast (v4.0)
+# 🐉 Stock AI Beast (v4.2)
 **The Sovereign Algorithmic Trading Engine**
 
 > **Current Status:** Stable Backtest & Mock Cycles | Live Execution Ready
-> **Last Updated:** 2026-01-10
+> **Last Updated:** 2026-01-27
+> **Architecture:** Sovereign (Physics > Regime > Strategy > Risk)
 
 ---
 
 ## 🏛️ Architecture Overview
 
-The "Beast" is built on a **Dual-Path Architecture** that separates high-latency intelligence from low-latency execution.
+The "Beast" (v4.2) is a **Deterministic Dimensional Engine**. It abandons the "LLM Fund Manager" approach (v4.0) in favor of a rigorous, sovereign mathematical stack where **Physics** and **Regime** are the final authorities.
 
-### 1. The Cold Path (Strategic Intelligence)
-Powered by a multi-model LLM setup (Qwen family), this layer acts as the "Fund Manager."
-- **Brain (Strategic)**: Analyzes pre-market gaps, VIX regimes, and multi-day price action to set the "Morning Brief."
-- **Worker (Tactical)**: Every 15 minutes, it digests the current price action against the Morning Brief to issue entry/exit instructions.
-- **Auditor (Learning)**: At 15:30 IST, it reviews all trades, performs a "Greed Gap Analysis," and extracts **Knowledge Nuggets** for long-term memory.
+### The Sovereign Stack (Data Flow)
 
-### 2. The Hot Path (Deterministic Execution)
-The **HotPathExecutor** is a zero-latency rules engine that enforces the Brain's instructions.
-- **Real-time Monitoring**: Once a trade is entered, it manages trailing stops and targets every millisecond.
-- **Safety Guardrails**: Implements circuit breakers (max loss per day, consecutive SL limits) and ensures no trade is held against a rapid reversal.
-- **Zero Hallucination**: No LLM calls are made during the milliseconds of trade execution.
+The system operates in a strictly hierarchical pipeline. Data flows DOWN, decisions flow UP.
+
+```mermaid
+graph TD
+    Data[Data Layer\n(Trading.db / Fyers)] --> Physics[Physics Engine\n(Calculators.py)]
+    Physics --> Enrichment[Enrichment Layer\n(Normalization)]
+    Enrichment --> Regime[Regime Engine\n(Cluster Identification)]
+    Regime --> Registry[Registry Layer\n(RAG / History Lookup)]
+    Registry --> Strategy[Strategy Logic\n(Confluence / Signal)]
+    Strategy --> Risk[Risk Guard\n(Policy / Sizing)]
+    Risk --> Execution[Trade Lifecycle\n(Executor)]
+```
+
+### 1. Physics Engine ( The Authority)
+*   **Role**: Defines "Reality".
+*   Calculates the **64-Dimensional Market State Vector** (Volatility, Entropy, VRP, Structure).
+*   **Authority**: If Physics says the trend is weak (Low TER), no trade can occur, regardless of what the strategy "thinks".
+
+### 2. Regime Engine (The Map)
+*   **Role**: Contextual Awareness.
+*   Classifies the market into specific **Cluster Pairs** (e.g., `Parent=6` / `Child=29`) using pre-trained KMeans models.
+*   **Philosophy**: We trade the **Shift**, not the static price.
+
+### 3. Registry Layer (The Memory)
+*   **Role**: Experience Retrieval (RAG).
+*   Queries the `knowledge_nuggets` database for: *"What happened the last 100 times we were in Regime 29:6?"*
+*   **Temporal Integrity**: Strictly enforces `created_at < current_sim_time` to prevent look-ahead bias.
+
+### 4. Risk Guard (The Sheriff)
+*   **Role**: Final Gatekeeper.
+*   **Sovereign Laws**:
+    *   **Regime Trap**: If a trade's thesis is invalidated (e.g., WinRate drops < 25%), it MUST exit immediately.
+    *   **Capital Preservation**: 50pt Hard SL / 90pt Target / Max 1 Open Position.
 
 ---
 
 ## 🚀 Key Capabilities
 
 ### 🌓 Execution Modes
-- **`backtest`**: Multi-year historical simulation with automated DuckDB data prefilling.
-- **`mock`**: Adversarial replay mode. Replays recent days through a stream producer to test engine stability.
-- **`live`**: Full-throttle automated execution via Fyers Websocket integration.
+*   **`backtest`**: Multi-year historical simulation with instant warmup (93k+ candles preloaded).
+*   **`mock`**: Adversarial replay mode for stress testing.
+*   **`live`**: Zero-latency execution via Fyers API (Active).
 
-### 🧠 Adaptive Intelligence
-- **VIX-Regime Awareness**: Dynamically adjusts SL/Target distance (Panic = 50pt SL, Complacent = 30pt SL).
-- **Gap Intelligence**: Early classification of gaps (Normal, Significant, Extreme) at 09:20 IST to trigger proactive strategy shifts.
-- **Self-Healing JSON**: A robust parser with heuristic truncation and brace-balancing to handle LLM artifacts without crashing the session.
-- **Experience RAG**: Captures daily lessons (Nuggets) into a structured dataset for future fine-tuning and retrieval-augmented reasoning.
-
-### 💰 Portfolio Engineering
-- **BalanceMonitor**: Tracks capital growth, drawdown, and implements "Wipeout Protection" (automated resets).
-- **PTS-to-Rupee Logic**: Accurate conversion of index points to real capital impact based on delta and lot sizes.
+### 🧠 Core Features
+*   **Development Parent Logic**: Trades correctly during the 09:15-09:30 gap using "Partial Candles".
+*   **Dynamic Targets**: Targets adjust based on Regime "Alpha" (High-Prob Regimes = Let Runners Run).
+*   **Self-Healing Data**: Automatic prefill and repair of `trading.db`.
 
 ---
 
@@ -47,25 +67,21 @@ The **HotPathExecutor** is a zero-latency rules engine that enforces the Brain's
 
 ```text
 stock-ai-beast/
-├── brain/            # AI Headquarters
-│   ├── llm_client.py     # Multi-model routing & JSON recovery
-│   ├── prompts.py        # Triple-layer prompt engineering
-│   └── prompt_manager.py # Context orchestration
-├── engine/           # The Engine Room
-│   ├── modes/            # [backtest, live, mock] implementations
-│   ├── gateway.py        # Mode factory & auto-prefill logic
-│   ├── journal.py        # Event recording & auditing
-│   └── portfolio_mgr.py  # Risk & Capital tracking
-├── hot_path/         # Low-latency execution logic
-├── data/             # The Memory Vault
-│   ├── database.py       # DuckDB & Redis interfaces
-│   ├── prefill.py        # Automated Fyers data ingestion
-│   └── feature_eng.py    # Indicator & technical logic
-├── workers/          # I/O Services
-│   ├── stream_producer.py # Live WebSocket & Mock replay
-│   └── oms.py            # Order Management System
-├── trigger.py        # The Master Switch (Control Plane)
-└── Dashboard/        # Visual monitoring & reporting
+├── atlas/            # The Dimensional Mind
+│   ├── regime.py         # KMeans Cluster Prediction
+│   ├── registry.py       # RAG Memory Lookup
+│   └── models/           # Pre-trained .joblib models
+├── engine/           # The Orchestrator
+│   ├── features/         # Physics Calculators
+│   ├── research_engine.py# Main Brain Loop
+│   └── risk_guard.py     # Safety Policeman
+├── data/             # The Gold Source
+│   ├── database.py       # DuckDB Interface
+│   └── trading.db        # The Truth (Candles + Trades)
+├── trade/            # The Executor
+│   ├── lifecycle.py      # Trade State Machine
+│   └── ledger.py         # PnL Tracking
+└── brokers/          # Connectivity (Sim/Live)
 ```
 
 ---
@@ -73,29 +89,27 @@ stock-ai-beast/
 ## 🛠️ Usage
 
 ### Quick Start (Backtest)
-```powershell
-python trigger.py backtest --symbol NIFTY --days 5 --balance 30000
+**Recommended**: Run via Docker for environment determinism.
+
+```bash
+# Run a specific day
+docker exec beast_engine python -m engine.gateway backtest --symbol NIFTY --start-date 2026-01-21 --end-date 2026-01-21
+
+# Run a range
+docker exec beast_engine python -m engine.gateway backtest --symbol NIFTY --start-date 2026-01-01 --end-date 2026-01-31
 ```
 
-### Mock Replay (Adversarial Test)
-```powershell
-python trigger.py mock --symbol BANKNIFTY --days 2 --debug
-```
-
-### Live Trading (Caution Required)
-```powershell
-python trigger.py live --symbol NIFTY
+### Mock Replay
+```bash
+docker exec beast_engine python -m engine.gateway mock --symbol BANKNIFTY --days 2
 ```
 
 ---
 
-## 📊 Performance Tracking
-The Beast generates a **Final Backtest Report** including:
-- **Win Rate & Profit Factor**
-- **Max Drawdown (PTS & ₹)**
-- **Wipeout Frequency**
-- **Fidelity Metrics**: Mean Open PnL vs. Peak Profit (MFE).
-- **Knowledge Base**: A list of extracted learnings from the session.
+## 📊 Performance Principles
+*   **Win Rate is Vanity**: We optimize for **Expectancy**.
+*   **Drawdown is Reality**: Max DD > 5% triggers a "Circuit Breaker" review.
+*   **Traceability**: Every trade is linked to a specific `Regime ID`.
 
 ---
-*Built for precision. Optimized for profit. Controlled by logic.*
+*Maintained by the Antigravity Team (v4.2)*

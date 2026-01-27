@@ -1,0 +1,20 @@
+version: '3.8'
+services:
+  beast_engine_gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    container_name: beast_engine_gpu
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Kolkata
+      - CUDA_VISIBLE_DEVICES=0 # Using the RTX 5090 identified in ai-core
+    volumes:
+      - .:/app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]

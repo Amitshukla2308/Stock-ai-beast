@@ -1,8 +1,9 @@
 {
     "_metadata": {
-        "version": "2.8.1-Authoritative",
-        "description": "Trading strategy configuration - ALL rules, thresholds, and policies. NO MAGIC NUMBERS ALLOWED IN CODE.",
-        "last_updated": "2026-01-21"
+        "version": "v6.2-SOVEREIGN",
+        "description": "Forge Build: v6.2 Darwinian Legacy (Expert Seed + Live Adaptation)",
+        "last_updated": "2026-01-28",
+        "forge_id": "BLACKWELL_FORGE_V6.2_FINAL"
     },
     "GLOBAL": {
         "ALLOW_ROTATIONAL_EXECUTION": true,
@@ -29,7 +30,75 @@
                 "end": "15:30",
                 "time_int_threshold": 1530
             },
-            "LATE_SESSION_CONFIDENCE_BOOST": 0.10
+            "LATE_SESSION_CONFIDENCE_BOOST": 0.0
+        }
+    },
+    "FORENSIC_BLOCKS": {
+        "regimes": [
+            "55:63",
+            "31:48",
+            "9:25",
+            "55:36",
+            "45:61",
+            "57:18",
+            "4:18",
+            "40:10",
+            "27:10",
+            "5:32",
+            "3:18",
+            "45:15",
+            "43:5",
+            "0:56",
+            "58:63",
+            "60:27",
+            "60:10",
+            "26:61",
+            "28:42",
+            "1:35"
+        ],
+        "time_windows": []
+    },
+    "REGIME_STERILIZATION": {
+        "block_list": [],
+        "toxic_regimes": [
+            "1:46",
+            "38:25",
+            "51:56",
+            "1:15",
+            "5:36",
+            "5:11"
+        ],
+        "sterilization_wr_floor": 0.60,
+        "description": "ENABLE v5.1 SNAPSHOT"
+    },
+    "ALPHA_AMPLIFICATION": {
+        "enabled": true,
+        "golden_regimes": [
+            "32:8",
+            "15:6",
+            "27:39",
+            "1:15",
+            "45:46",
+            "49:4"
+        ],
+        "size_multiplier": 2,
+        "description": "v6.2 Darwinian Legacy: Bootstrap Seeds + Live Adaptation"
+    },
+    "EXIT_STRATEGY": {
+        "target_type": "INFINITE",
+        "fixed_target_points": 90.0,
+        "description": "Standard infinite target logic."
+    },
+    "TRANSITION_ENGINE": {
+        "description": "Protects against Regime Flicker. Hysteresis = consecutive bars required to confirm a trap.",
+        "enabled": true,
+        "invalidation_threshold": 0.15,
+        "hysteresis_period": 2,
+        "stall_decay": {
+            "enabled": false,
+            "max_bars_negative": 4,
+            "wr_threshold": 0.35,
+            "description": "DISABLED"
         }
     },
     "SIGNALS": {
@@ -101,16 +170,46 @@
             "call_requires_positive": true,
             "put_requires_negative": true,
             "slope_threshold": -5.0
-        },
-        "countertrend": {
-            "allowed_styles": [
-                "REMR",
-                "VBD"
-            ],
-            "allowed_regimes": [
-                "ROTATION",
-                "RANGE"
-            ]
         }
+    },
+    "countertrend": {
+        "allowed_styles": [
+            "REMR",
+            "VBD"
+        ],
+        "allowed_regimes": [
+            "ROTATION",
+            "RANGE"
+        ]
+    },
+    "SEMANTIC_RISK_GUARD": {
+        "exhaustion_veto": {
+            "enabled": false
+        },
+        "stale_exit": {
+            "enabled": false
+        },
+        "jitter_guard": {
+            "enabled": false
+        },
+        "forced_targets": {
+            "target_points": 0.0
+        }
+    },
+    "RISK_CAPS": {
+        "max_daily_trades": 100,
+        "soft_limit": 100,
+        "soft_limit_wr_floor": 0.0,
+        "morning_window": {
+            "start": "09:15",
+            "end": "10:45",
+            "wr_floor_override": 0.0,
+            "description": "DISABLED"
+        },
+        "daily_loss_limit": {
+            "max_consecutive_losses": 100,
+            "description": "DISABLED"
+        },
+        "description": "DISABLED"
     }
 }

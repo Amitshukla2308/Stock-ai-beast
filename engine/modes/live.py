@@ -1,33 +1,34 @@
 """
-v2.8 Live Mode (Unified)
+v6.2 Live Mode (Unified)
 Thin wrapper driving the Modular Architecture (ResearchEngine + Orchestrator) with Fyers Broker (or SimBroker for Mock).
-Decoupled from legacy HotPathExecutor.
+Ensures matching logic with v6.2 Backtest (Lifecycle + Darwinian Registry).
 """
 import logging
 import time
 import pytz
 import math
+import pandas as pd
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from dateutil import parser as date_parser
 
 from engine.modes.base_mode import BaseMode
+from engine.comm import emit_telegram_signal # Integrated
 from engine.journal import Journal
 from brain.llm_client import LLMClient
 from brokers.fyers.broker import FyersBroker
 from brokers.simulator.broker import SimBroker
 from data.database import fetch_context_data
 
-# v2.8 Modules
-from core.orchestrator import Orchestrator
-from executor.execute import Executor
+# v6.2 Modules
 from engine.research_engine import ResearchEngine
 from config.config_loader import config
 
+# v6.2 Trade Lifecycle
+from trade import create_lifecycle, trade_store
+
 IST = pytz.timezone('Asia/Kolkata')
 logger = logging.getLogger(__name__)
-
-
 
 def safe_float(val):
     try:
@@ -56,26 +57,24 @@ class LiveMode(BaseMode):
         self.journal = Journal(session_id=self.session_id)
         self.brain = LLMClient()
         
-        # 2. The Modular Graph
-        self.executor = Executor(broker=self.broker)
-        self.orchestrator = Orchestrator(executor=self.executor)
+        # 2. Research Engine (v6.2 Logic)
         self.research_engine = ResearchEngine(llm_client=self.brain)
         
-        # 3. State & Helpers
+        # 3. Trade Lifecycle (v6.2 Persistence)
+        self.lifecycle = create_lifecycle(self.session_id, self.broker, is_simulation=False)
+        
+        # 4. State & Helpers
         self.scheduler = BackgroundScheduler(timezone=IST)
         self.running = False
         self.last_tick = None
         self.morning_brief = None
         self.last_morning_date = None
-        
         self.last_llm_time = datetime.min.replace(tzinfo=IST)
-        
-        self.last_ledger_len = 0
         
         self._setup_schedule()
 
     def start(self):
-        logger.info(f"🚀 Starting {self.mode_tag} Mode")
+        logger.info(f"🚀 Starting {self.mode_tag} Mode (v6.2-SOVEREIGN)")
         self.running = True
         self.scheduler.start()
         
@@ -98,9 +97,16 @@ class LiveMode(BaseMode):
 
     def on_tick(self, message):
         """Handle Live Tick"""
-        # ... logic
+        if not self.running: return
+
         try:
-             ts = date_parser.parse(message.get('timestamp'))
+             # Flexible timestamp parsing
+             ts_raw = message.get('timestamp')
+             if isinstance(ts_raw, str):
+                 ts = date_parser.parse(ts_raw)
+             else:
+                 ts = datetime.fromtimestamp(ts_raw if ts_raw else time.time())
+                 
              if ts.tzinfo is None: ts = IST.localize(ts)
         except:
              ts = datetime.now(IST)
@@ -116,65 +122,20 @@ class LiveMode(BaseMode):
         }
         self.last_tick = tick
         
-        # 1. Orchestrate
-        self.orchestrator.process_tick(tick)
-        
-        # 2. Research (Event Driven)
-        if self.morning_brief:
-            self._check_signals_and_trigger(tick, ts)
-            
-        # 3. Sync Trades
-        self._sync_new_trades(ts)
+        # 1. Process Tick (Research Engine Update)
+        # Note: In Live, we don't run the heavy loop every tick.
+        # We rely on Morning Brief + Scheduled Tactical Updates + Alerts
+        pass
 
         # Heartbeat
         self._check_heartbeat(ts, tick)
 
-    def _check_signals_and_trigger(self, tick, ts):
-        context = fetch_context_data(ts, symbol=self.symbol)
-        context['time_str'] = ts.strftime('%H:%M:%S')
-        context['symbol'] = self.symbol
-        
-        # Gated call (Fast)
-        packet = self.research_engine.process_tick(context, self.morning_brief, allow_llm=False)
-        signals = packet.get('signals', {})
-        
-        reason = ""
-        trigger = False
-        if signals.get('rejection'): trigger, reason = True, "Rejection"
-        elif signals.get('impulse_detected'): trigger, reason = True, "Impulse"
-        elif signals.get('structural_break'): trigger, reason = True, "Breakout"
-        
-        if trigger:
-             if (datetime.now(IST) - self.last_llm_time).total_seconds() > 300:
-                  self._run_tactical_update(context, reason)
 
-    def _sync_new_trades(self, ts):
-        current_len = len(self.executor.trade_ledger)
-        if current_len > self.last_ledger_len:
-             new_trades = self.executor.trade_ledger[self.last_ledger_len:]
-             for trade in new_trades:
-                  # Log Closed Trades
-                  if trade.get('type') == 'EXIT':
-                       self.journal.log_trade(trade)
-                       self._emit_trade_alert(trade, ts)
-             self.last_ledger_len = current_len
-
-    def _emit_trade_alert(self, trade, ts):
-        self._emit_telegram_event("TRADE", {
-            "date": ts.strftime('%Y-%m-%d'),
-            "side": trade.get('side'),
-            "entry": trade.get('entry_price'),
-            "exit": trade.get('exit_price'),
-            "pnl": trade.get('pnl'),
-            "reason": trade.get('reason')
-        }, mode_tag=self.mode_tag)
-
-    # ... (Rest methods same as previous step: _run_tactical_update, _emit_trace, _setup_schedule, triggers etc)
-    # Re-pasting the methods for completeness in write_to_file
-    
-    def _run_tactical_update(self, context=None, reason="Scheduled"):
-        if not self.morning_brief: return
-        
+    def _run_engine_cycle(self, context=None, reason="Scheduled"):
+        """
+        Periodically runs the full Research Stack to check for entries.
+        Connected to Scheduler (every 5m).
+        """
         if context is None:
             if not self.last_tick: return
             ts = self.last_tick['timestamp']
@@ -182,64 +143,87 @@ class LiveMode(BaseMode):
             context['time_str'] = ts.strftime('%H:%M:%S')
             context['symbol'] = self.symbol
             
-        logger.info(f"   🧠 Running Tactical Update ({reason})...")
-        packet = self.research_engine.process_tick(context, self.morning_brief, allow_llm=True)
-        decision = packet.get('decision', {})
+        logger.info(f"   ⚙️ Running Engine Cycle ({reason})...")
         
+        # 1. Reasoning
+        packet = self.research_engine.process_tick(context, None, allow_llm=False) # LLM disabled
+        decision = packet.get('decision', {})
         self.last_llm_time = datetime.now(IST)
-        self._emit_trace(packet, reason)
         
-        if decision.get('action') in ["BUY_CALL", "BUY_PUT"]:
-            self.executor.execute_entry(decision, datetime.now(IST))
+        # 2. Logic: Signal -> Lifecycle -> Broker -> DB
+        action = decision.get('action', 'HOLD')
+        if action in ["BUY_CALL", "BUY_PUT"]:
+            
+            # A. Propose
+            trade = self.lifecycle.propose_trade(decision, context, datetime.now(IST))
+            
+            # B. Execute (Broker)
+            logger.info(f"⚡ Executing {trade.direction} {trade.quantity} Qty @ Market...")
+            
+            fill = self.broker.execute_entry(
+                symbol=trade.symbol,
+                side=trade.direction,
+                quantity=trade.quantity,
+                price=trade.entry_price,
+                sl=trade.sl_price,
+                target=trade.target_price,
+                reason=trade.reason,
+                timestamp=trade.entry_time
+            )
+            
+            # C. Open (Persistence)
+            if fill.get('status') == "FILLED" or fill.get('order_id'):
+                # Patch Trade with actuals if available
+                if fill.get('price'): trade.entry_price = fill.get('price')
+                trade.metadata['broker_order_id'] = fill.get('order_id')
+                
+                if self.lifecycle.open_trade(trade):
+                    logger.info(f"✅ Trade {trade.trade_id} OPENED in Ledger.")
+                    self._emit_telegram_event("TRADE_OPEN", trade.to_dict(), mode_tag=self.mode_tag)
+                else:
+                    logger.error(f"❌ Failed to Open Trade {trade.trade_id} in Lifecycle (Ledger Conflict?)")
+            else:
+                 logger.error(f"❌ Broker Execution Failed: {fill.get('error')}")
 
-    def _emit_trace(self, packet, reason):
-        decision = packet.get('decision', {})
-        enrichment = packet.get('enrichment', {})
-        trace_payload = {
-            "llm_type": "TACTICAL",
-            "time": datetime.now(IST).strftime('%H:%M'),
-            "trigger": reason,
-            "action": decision.get('action', 'HOLD'),
-            "selected_style": decision.get('selected_style', 'NONE'),
-            "confidence": decision.get('confidence', 0.0),
-            "reason": decision.get('reason'),
-            "market_micro_context": {
-                "trend": enrichment.get('trend_regime'),
-                "ter": enrichment.get('trend_efficiency'),
-                "location": enrichment.get('location_class')
-            }
-        }
-        self._emit_telegram_event("LLM_TRACE", trace_payload, mode_tag=self.mode_tag)
+        self._emit_trace(packet, reason)
+
+    # --- Darwinian EOD Update ---
+    def trigger_eod_journal(self):
+        """
+        v6.2 EOD Routine:
+        1. Query today's trades from DB.
+        2. Feed into Registry.update_walk_forward_map for Darwinian learning.
+        3. Print Summary.
+        """
+        logger.info("🌙 Running EOD Darwinian Update...")
+        
+        # 1. Fetch Today's Trades
+        today_str = datetime.now(IST).strftime('%Y-%m-%d')
+        import sqlite3
+        conn = sqlite3.connect('data/trading.db')
+        
+        # Assuming v6.2 schema
+        query = f"SELECT * FROM trades WHERE date(entry_time) = '{today_str}'"
+        df = pd.read_sql(query, conn)
+        conn.close()
+        
+        if df.empty:
+            logger.info("   ⚠️ No trades today. No learning updates.")
+        else:
+            # 2. Update Registry
+            self.research_engine.registry.update_walk_forward_map(df)
+            logger.info(f"   🦅 Registry Updated with {len(df)} live trades.")
+            
+        logger.info("✅ EOD Sequence Complete.")
 
     def _setup_schedule(self):
         if self.debug_schedule:
-             self.scheduler.add_job(self.trigger_morning_brief, 'interval', seconds=30)
-             self.scheduler.add_job(self._run_tactical_update, 'interval', minutes=15)
+             self.scheduler.add_job(self._run_engine_cycle, 'interval', minutes=5)
              return
-        self.scheduler.add_job(self.trigger_morning_brief, 'cron', hour=9, minute=30, day_of_week='mon-fri')
-        self.scheduler.add_job(self._run_tactical_update, 'cron', hour='9-15', minute='*/15', day_of_week='mon-fri')
-        self.scheduler.add_job(self.trigger_eod_journal, 'cron', hour=15, minute=30, day_of_week='mon-fri')
-
-    def trigger_morning_brief(self):
-        if not self.last_tick: return
-        ts = self.last_tick['timestamp']
-        if self.last_morning_date == ts.date(): return
         
-        logger.info(f"   [{ts.strftime('%H:%M')}] 🧠 Generatng Morning Brief...")
-        context = fetch_context_data(ts, symbol=self.symbol)
-        
-        brief = self.brain.get_morning_brief(context, current_tick=self.last_tick, symbol=self.symbol)
-        self.morning_brief = brief
-        self.last_morning_date = ts.date()
-        
-        self._emit_telegram_event("MORNING_BRIEF", {
-            "date": ts.strftime('%Y-%m-%d'),
-            "plan": brief.get('morning_logic')
-        }, mode_tag=self.mode_tag)
-
-    def trigger_eod_journal(self):
-        # Placeholder for EOD logic
-        pass
+        # Standard Market Schedule (Every 5 mins to match Backtest Logic)
+        self.scheduler.add_job(self._run_engine_cycle, 'cron', hour='9-15', minute='*/5', day_of_week='mon-fri')
+        self.scheduler.add_job(self.trigger_eod_journal, 'cron', hour=15, minute=35, day_of_week='mon-fri')
 
     def _start_redis_consumer(self):
         import threading
@@ -252,10 +236,11 @@ class LiveMode(BaseMode):
         try:
             r = redis.Redis(host='172.19.0.2', port=6379, decode_responses=False)
             stream_key = b"market_feed"
-            last_id = b'0-0'
+            last_id = b'$' # Start from new messages
+            
             while self.running:
                  try:
-                     messages = r.xread({stream_key: last_id}, count=1)
+                     messages = r.xread({stream_key: last_id}, count=1, block=1000)
                      if messages:
                          for stream, msg_list in messages:
                              for msg_id, data in msg_list:
@@ -270,8 +255,6 @@ class LiveMode(BaseMode):
                                  }
                                  self.on_tick(tick_data)
                                  last_id = msg_id
-                     else:
-                         time.sleep(0.01)
                  except Exception:
                      time.sleep(1)
         except Exception:
@@ -281,7 +264,24 @@ class LiveMode(BaseMode):
         if not hasattr(self, 'last_heartbeat_time'): self.last_heartbeat_time = ts
         time_since_hb = (ts - self.last_heartbeat_time).total_seconds() / 60
         if time_since_hb >= 5:
-            pos = self.executor.open_position
-            status = f"Pos: {pos['side']} @ {pos['entry_price']}" if pos else "WAIT"
+            # We can check open positions via TradeLedger now
+            from trade.ledger import trade_ledger
+            open_pos = len(trade_ledger.open_positions)
+            status = f"Active Trades: {open_pos}"
             logger.info(f"   [{ts.strftime('%H:%M')}] 💓 Monitor: Price {tick['close']:.1f} | {status}")
             self.last_heartbeat_time = ts
+
+    def _emit_telegram_event(self, event_type, payload, mode_tag="LIVE"):
+        """
+        Routes internal events to the centralized Communication Module.
+        This sends the data to n8n Webhook for Telegram Notification.
+        """
+        # Ensure Chat ID is attached
+        if self.chat_id:
+            payload['chatId'] = self.chat_id
+            
+        emit_telegram_signal(event_type, payload, mode_tag=mode_tag)
+
+    def _emit_trace(self, packet, reason):
+        # Trace implementation (logging)
+        pass

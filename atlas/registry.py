@@ -16,7 +16,9 @@ class Registry:
         self.artifact_dir = artifact_dir
         self.long_edges = {}
         self.short_edges = {}
+        self.live_learning_map = {} # v6.0: Stores EOD updates during backtest
         self._load_registry()
+        self._seed_from_bootstrap() # v6.2: Pre-populate with historical edge
 
     def _load_registry(self):
         conf_path = os.path.join(self.artifact_dir, "confluence_map.json")
@@ -48,22 +50,52 @@ class Registry:
 
     def get_alpha_state(self, c15: int, c5: int, cutoff_time: Optional[datetime] = None) -> Dict[str, Any]:
         """
-        Retrieves stats for a cluster pair with Temporal Guarding.
-        If cutoff_time is provided, it can fallback to RAG for discovery.
+        Retrieves stats for a cluster pair with Temporal Guarding (v6.0).
         """
         key = (int(c15), int(c5))
-        
-        # 1. Primary: High-Alpha Map (Research Baseline)
-        if key in self.long_edges:
-            edge = self.long_edges[key]
+        is_live_period = cutoff_time and cutoff_time.year >= 2025
+
+        # 1. v6.0: Check Live Learning Map first (Rolling Experience)
+        if is_live_period and key in self.live_learning_map:
+            edge = self.live_learning_map[key]
+            tier = edge.get('tier', 2)
+            
             return {
-                "bias": "LONG",
-                "win_rate": edge.get('win_rate_long', 0.0),
-                "avg_mfe": edge.get('avg_mfe_long', 0.0),
-                "avg_mae": edge.get('avg_mae_long', 0.0),
-                "confluence_id": f"LONG_{c15}_{c5}",
-                "is_fallback": False
+                "bias": edge['bias'],
+                "win_rate": edge['win_rate'],
+                "avg_mfe": edge.get('avg_mfe', 0.0),
+                "avg_mae": edge.get('avg_mae', 0.0),
+                "confluence_id": f"T{tier}_{c15}_{c5}",
+                "is_fallback": False,
+                "tier": tier,
+                "expectancy": edge.get('expectancy', 0.0)
             }
+
+        # 2. Primary: High-Alpha Map (Research Bootstrap 2021-2024)
+        # In v6.0, we ONLY use this if we haven't learned enough in the live period yet
+        # OR if we are in the pre-2025 bootstrap phase.
+        if not is_live_period:
+            if key in self.long_edges:
+                edge = self.long_edges[key]
+                return {
+                    "bias": "LONG",
+                    "win_rate": edge.get('win_rate_long', 0.0),
+                    "avg_mfe": edge.get('avg_mfe_long', 0.0),
+                    "avg_mae": edge.get('avg_mae_long', 0.0),
+                    "confluence_id": f"BOOT_{c15}_{c5}",
+                    "is_fallback": False
+                }
+            
+            if key in self.short_edges:
+                edge = self.short_edges[key]
+                return {
+                    "bias": "SHORT",
+                    "win_rate": edge.get('win_rate_short', 0.0),
+                    "avg_mfe": edge.get('avg_mfe_short', 0.0),
+                    "avg_mae": edge.get('avg_mae_short', 0.0),
+                    "confluence_id": f"BOOT_{c15}_{c5}",
+                    "is_fallback": False
+                }
         
         if key in self.short_edges:
             edge = self.short_edges[key]
@@ -111,3 +143,105 @@ class Registry:
             "confluence_id": f"NONE_{c15}_{c5}",
             "is_fallback": False
         }
+
+    def _seed_from_bootstrap(self):
+        """
+        v6.2 Darwinian Legacy: Seeds the learning map with 4-year historical expertise.
+        Injects Golden, Standard, and Blocked regimes from research.
+        """
+        from config.config_loader import config
+        amp_cfg = config.get("ALPHA_AMPLIFICATION", {})
+        block_cfg = config.get("FORENSIC_BLOCKS", {})
+        steril_cfg = config.get("REGIME_STERILIZATION", {})
+
+        # 1. Golden Regimes (Tier 1)
+        for r_id in amp_cfg.get("golden_regimes", []):
+            try:
+                c15, c5 = map(int, r_id.split(':'))
+                self.live_learning_map[(c15, c5)] = {
+                    'bias': 'LONG', 'win_rate': 0.62, 'expectancy': 2.5,
+                    'tier': 1, 'count': 20, 'net_pnl': 15000 # v6.2: Increased Inertia
+                }
+            except Exception: continue
+
+        # 2. Toxic Regimes (Tier 4)
+        toxic_list = set(block_cfg.get("regimes", [])) | set(steril_cfg.get("block_list", []))
+        for r_id in toxic_list:
+            try:
+                c15, c5 = map(int, r_id.split(':'))
+                self.live_learning_map[(c15, c5)] = {
+                    'bias': 'NONE', 'win_rate': 0.30, 'expectancy': -20.0,
+                    'tier': 4, 'count': 20, 'net_pnl': -15000 
+                }
+            except Exception: continue
+            
+        logger.info(f"[REGISTRY] 🏁 v6.2 Seeded {len(self.live_learning_map)} regimes from Expert Legacy.")
+
+    def _assign_historical_tier(self, key: tuple, edge: dict, bias: str):
+        """Helper to categorize historical expertise into Darwinian Tiers. (Deprecated in v6.2)"""
+        pass
+
+    def update_walk_forward_map(self, session_all_trades: pd.DataFrame):
+        """
+        v6.0: Updates the internal learning map based on simulation history.
+        Called by BacktestMode at EOD.
+        """
+        if session_all_trades.empty: return
+        
+        # Group by regime to calculate current session stats
+        stats = session_all_trades.groupby('regime').agg({
+            'pnl_rupees': 'sum',
+            'pnl_points': 'mean',
+            'trade_id': 'count',
+            'quantity': 'first' # To detect current sizing
+        }).rename(columns={'trade_id': 'count', 'pnl_points': 'expectancy'})
+
+        # Binary win calculation
+        wins = session_all_trades[session_all_trades['pnl_points'] > 0].groupby('regime')['trade_id'].count()
+        
+        for regime_id, row in stats.iterrows():
+            try:
+                c15, c5 = map(int, regime_id.split(':'))
+                key = (c15, c5)
+                
+                # v6.2: Accumulate upon bootstrap seeds if they exist
+                historical = self.live_learning_map.get(key, {'count': 0, 'net_pnl': 0, 'win_rate': 0.5})
+                
+                session_count = row['count']
+                total_count = historical['count'] + session_count
+                
+                # Weighting: New Win Rate is a weighted average
+                session_wr = wins.get(regime_id, 0) / session_count if session_count > 0 else 0.0
+                total_wr = ((historical['win_rate'] * historical['count']) + (session_wr * session_count)) / total_count
+                
+                total_pnl = historical['net_pnl'] + row['pnl_rupees']
+                expectancy = row['expectancy'] # Just use current session expectancy for momentum?
+                                               # Or average? Let's use average for stability.
+                total_expectancy = (total_pnl / total_count / 35.75) if total_count > 0 else 0 # Points approx
+
+                # --- v6.1/6.2 Darwinian Tier Classification ---
+                tier = 2 # Default: Standard
+                
+                # Tier 1: Golden (Robust over Bootstrap + 2025)
+                if total_count >= 10 and total_wr >= 0.58 and total_expectancy >= 1.5:
+                    tier = 1
+                
+                # Tier 4: Blocked (Toxic Failure)
+                elif total_count >= 5 and (total_wr < 0.38 or total_expectancy < -10.0):
+                    tier = 4
+                
+                # Tier 3: Probation (Underperforming)
+                elif total_count >= 3 and (total_wr < 0.52 or total_expectancy < 0.0):
+                    tier = 3
+                
+                self.live_learning_map[key] = {
+                    'bias': 'LONG' if total_expectancy > 0 else 'SHORT',
+                    'win_rate': total_wr,
+                    'expectancy': total_expectancy,
+                    'tier': tier,
+                    'count': total_count,
+                    'net_pnl': total_pnl
+                }
+            except Exception: continue
+
+        logger.info(f"[REGISTRY] 🧠 v6.1 Darwinism Updated: {len(self.live_learning_map)} regimes categorized.")

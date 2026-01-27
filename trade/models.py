@@ -23,6 +23,8 @@ class ExitReason(Enum):
     EOD = "EOD"
     INVALIDATION = "INVALIDATION"
     EDGE_DEATH = "EDGE_DEATH"
+    STALE = "STALE"       # v4.4 Time-decay exit
+    JITTER = "JITTER"     # v4.4 Volatility-fear exit
     MANUAL = "MANUAL"
     AI_LOGIC = "AI_LOGIC"
 

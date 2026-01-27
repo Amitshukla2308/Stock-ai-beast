@@ -1,0 +1,31 @@
+# v4.4.1 GPU-Accelerated Atlas Environment (Verified Blackwell/RTX 5090 Ready)
+FROM rapidsai/base:25.12-cuda12-py3.12
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+ENV TZ=Asia/Kolkata
+
+# Install additional python dependencies not in RAPIDS base
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    # Ensure standard libraries are present
+    pip install --no-cache-dir redis apscheduler pytz fyers-apiv3 openai setuptools fastparquet pyarrow
+
+# Copy Codebase
+COPY . .
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Default command (keeps container alive for docker exec)
+CMD ["tail", "-f", "/dev/null"]

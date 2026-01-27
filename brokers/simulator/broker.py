@@ -18,34 +18,53 @@ class SimBroker(BaseBroker):
         self.trade_count = 0
         
     def execute_entry(self, symbol, side, quantity, price, sl, target, reason, timestamp=None):
+        # Slippage: 1.5 pts penalty on Entry (Buy)
+        slippage = 1.5
+        fill_price = price + slippage
+        
         self.open_position = {
             'symbol': symbol,
             'side': side,
             'quantity': quantity,
-            'entry_price': price,
+            'entry_price': fill_price,
             'sl': sl,
             'target': target,
             'reason': reason,
             'entry_time': timestamp
         }
-        return {"status": "FILLED", "price": price}
+        return {"status": "FILLED", "price": fill_price}
 
     def execute_exit(self, symbol, side, quantity, price, reason, timestamp=None):
         if not self.open_position:
             return {"status": "FAILED", "error": "No open position to exit"}
         
         pos = self.open_position
-        pnl_pts = price - pos['entry_price'] if pos['side'] == 'CALL' else pos['entry_price'] - price
-        rupee_pnl = pnl_pts * self.pts_to_rupees * (quantity / 65.0) 
         
-        self.balance += rupee_pnl
+        # Slippage: 1.5 pts penalty on Exit (Sell)
+        slippage = 1.5
+        fill_price = price - slippage
+        
+        # Brokerage: fixed 20 rupees per trade (deducted at exit)
+        brokerage = 20.0
+        
+        pnl_pts = fill_price - pos['entry_price'] if pos['side'] == 'CALL' else pos['entry_price'] - fill_price
+        
+        # Caluclate Gross PnL
+        gross_pnl_rupees = pnl_pts * self.pts_to_rupees * (quantity / 65.0) 
+        
+        # Net PnL = Gross - Brokerage
+        net_pnl_rupees = gross_pnl_rupees - brokerage
+        
+        self.balance += net_pnl_rupees
         self.trade_count += 1
         
         # Record history
         self.balance_history.append({
             'timestamp': timestamp,
             'balance': self.balance,
-            'pnl_rupees': rupee_pnl
+            'pnl_rupees': net_pnl_rupees,
+            'brokerage': brokerage,
+            'slippage_pts': 3.0 # Total for trade
         })
         
         if self.balance < self.margin_required:
@@ -56,7 +75,7 @@ class SimBroker(BaseBroker):
             print(f"      💀 [SimBroker] WIPEOUT! Injected ₹{injection:.0f}")
             
         self.open_position = None
-        return {"status": "FILLED", "price": price, "pnl_pts": pnl_pts, "rupee_pnl": rupee_pnl}
+        return {"status": "FILLED", "price": fill_price, "pnl_pts": pnl_pts, "rupee_pnl": net_pnl_rupees}
 
     def get_summary(self):
         return {

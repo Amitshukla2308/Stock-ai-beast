@@ -39,7 +39,7 @@ TACTICAL_END_TIME = time(15, 30)
 EOD_TIME = time(15, 30)
 
 class BacktestMode(BaseMode):
-    def __init__(self, start_date, end_date, symbol="NIFTY", resolution="5", initial_balance=30000, chat_id=None):
+    def __init__(self, start_date, end_date, symbol="NIFTY", resolution="5", initial_balance=30000, chat_id=None, use_gpu: bool = False):
         self.chat_id = chat_id
         self.start_date = start_date
         self.end_date = end_date
@@ -52,11 +52,9 @@ class BacktestMode(BaseMode):
         self.journal = Journal(session_id=self.session_id)
         
         # Override trace_logger session_id for this session
-        from audit.trace_logger import trace_logger
-        trace_logger.session_id = self.session_id
-        
         # 2. Research Engine (v4.0 Brain)
-        self.engine = ResearchEngine()
+        self.use_gpu = use_gpu
+        self.engine = ResearchEngine(use_gpu=use_gpu)
         
         # 3. Trade Engine (v2.8)
         self.lifecycle = create_lifecycle(self.session_id, self.broker, is_simulation=True)
@@ -66,11 +64,19 @@ class BacktestMode(BaseMode):
         self.today_bars = []
         self.daily_summaries = []
         self.daily_context = {} 
+        self.equity_curve = [] # Time Series Tracker
 
+        # Blackwell Persistence Cache (v4.4.2)
+        self._batch_signals = None # Will store dict of timestamp -> regime info
+        
     def start(self):
         """Run the Historical Backtest"""
         logger.info(f"📊 Starting Atlas Backtest: {self.start_date.date()} to {self.end_date.date()} (Session: {self.session_id})")
         
+        # v4.4.2 Blackwell Persistence: Prime the entire range if using GPU
+        if self.use_gpu:
+            self._precompute_batch_features()
+
         self.journal.register_session(
             symbol=self.symbol,
             start_date=self.start_date.strftime('%Y-%m-%d'),
@@ -82,10 +88,16 @@ class BacktestMode(BaseMode):
             self._run_simulation()
         finally:
             atlas_logger.flush()
-            from audit.trace_logger import trace_logger
-            trace_logger.flush()
             # Generate Report
             trade_reporter.generate_session_report(self.session_id, self.daily_summaries, llm_client=None)
+            
+            # Export Equity Curve
+            if self.equity_curve:
+                import pandas as pd
+                df_eq = pd.DataFrame(self.equity_curve)
+                path = f"data/equity_curve_{self.session_id}.csv"
+                df_eq.to_csv(path, index=False)
+                logger.info(f"📈 Equity Curve saved to: {path}")
 
     def stop(self):
         self.running = False
@@ -93,7 +105,7 @@ class BacktestMode(BaseMode):
         atlas_logger.flush()
 
     def _on_day_ended(self, ts, last_close):
-        """Standard EOD Hook."""
+        """Standard EOD Hook (v6.0: Includes Rolling Update)."""
         summary = eod_processor.end_of_day(
             self.lifecycle, last_close, ts,
             llm_client=None, # No LLM summary
@@ -101,6 +113,22 @@ class BacktestMode(BaseMode):
             symbol=self.symbol,
             today_bars=self.today_bars
         )
+        
+        # v6.0 TheRealSimulation: Update brain's experience with today's simulation results
+        from data.database import get_connection
+        import pandas as pd
+        
+        conn = get_connection()
+        try:
+            # Fetch all trades for this specific backtest session so far
+            query = f"SELECT * FROM trades WHERE trade_id LIKE '{self.session_id}%'"
+            df_session = pd.read_sql_query(query, conn)
+            self.engine.registry.update_walk_forward_map(df_session)
+        except Exception as e:
+            logger.error(f"[BACKTEST] 🧠 v6.0 Learning Update Failed: {e}")
+        finally:
+            conn.close()
+
         return summary
 
     def _resample_to_15m(self, df_5m):
@@ -126,6 +154,76 @@ class BacktestMode(BaseMode):
         df_15 = df_15.reset_index()
         return df_15
 
+    def _precompute_batch_features(self):
+        """
+        Blackwell Persistence: Calculates ALL features for the entire session on GPU.
+        Eliminates 93k PCIe transfers in the backtest loop.
+        """
+        logger.info("🧪 [BLACKWELL] Priming VRAM for session persistence...")
+        
+        # 1. Fetch entire historical range (+ warmup)
+        warmup_start = self.start_date - timedelta(days=10) # Safe buffer for 200 bars
+        # Extend end_date to include the full last day
+        query_end = self.end_date + timedelta(days=1)
+        
+        from data.database import get_connection, get_fyers_symbol, IST
+        conn = get_connection()
+        full_symbol = get_fyers_symbol(self.symbol)
+        
+        query = f"""
+            SELECT timestamp, open, high, low, close, volume 
+            FROM candles_5min 
+            WHERE symbol = '{full_symbol}' 
+              AND timestamp BETWEEN '{warmup_start}' AND '{query_end}'
+            ORDER BY timestamp ASC
+        """
+        logger.info(f"   [BLACKWELL] Querying range: {warmup_start} to {query_end}")
+        df_all = pd.read_sql_query(query, conn)
+        conn.close()
+        
+        if df_all.empty: return
+        
+        df_all['timestamp'] = pd.to_datetime(df_all['timestamp'])
+        # Handle timezones as in DataAdapter
+        if df_all['timestamp'].dt.tz is None:
+            df_all['timestamp'] = df_all['timestamp'].dt.tz_localize('UTC')
+        df_all['timestamp'] = df_all['timestamp'].dt.tz_convert(IST)
+        
+        from engine.features.calculators_gpu import AtlasFeaturesGPU
+        from engine.features.physics_engine import PhysicsEngine
+        
+        # 2. Physics & Features (Bulk GPU)
+        logger.info(f"   - Calculating Physics Context for {len(df_all)} bars...")
+        df_5m_64d = AtlasFeaturesGPU.calculate_all(PhysicsEngine.add_context(df_all))
+        
+        # 15m Resample for Parent
+        df_all_v = df_all.set_index('timestamp')
+        df_15m = df_all_v.resample('15min').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+        }).dropna().reset_index()
+        
+        logger.info(f"   - Calculating Parent Context ({len(df_15m)} bars)...")
+        df_15m_64d = AtlasFeaturesGPU.calculate_all(PhysicsEngine.add_context(df_15m))
+        
+        # 3. Regime Identification (Bulk GPU)
+        # Use existing engine instance to avoid redundant 5-second model load
+        regime_engine = self.engine.regime
+        logger.info("   - Running Vectorized Cluster Projection (Bulk Identification)...")
+        regime_labels = regime_engine.identify_clusters_batch(df_5m_64d, df_15m_64d)
+        
+        # 4. Persistence Map (Dictionary for O(1) lookup during sim)
+        # Store as dict: timestamp -> {c15, c5, features}
+        # We also want the raw feature dict for trace/monitoring
+        logger.info("   - Building Persistence Map...")
+        
+        # Merge regimes into 5m features
+        df_final = pd.merge(df_5m_64d, regime_labels, on='timestamp', how='left').fillna(0)
+        
+        # Convert to high-speed lookup (STRING KEYS for Safety)
+        df_final['ts_key'] = df_final['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        self._batch_signals = df_final.set_index('ts_key').to_dict('index')
+        logger.info(f"🚀 [BLACKWELL] Persistence Engine Ready. Cached {len(self._batch_signals)} signals.")
+
     def on_tick(self, message):
         """
         Handles a single tick (5-min candle).
@@ -143,82 +241,190 @@ class BacktestMode(BaseMode):
         }
         self.today_bars.append(bar)
         
-        # 1. Prepare DataFrames for Engine
-        # Retrieve historical context (list of dicts)
-        hist_5min = self.daily_context.get('last_5min', [])
-        
-        # Today's bars (Normalize keys to match hist_5min)
-        from data.database import IST
-        today_bars_std = []
-        for b in self.today_bars:
-            dt = pd.to_datetime(b['ts'])
-            if dt.tzinfo is None:
-                dt = dt.tz_localize('Asia/Kolkata') # Assume IST for backtest local strings
-            today_bars_std.append({
-                'timestamp': dt,
-                'open': b['o'], 'high': b['h'], 'low': b['l'], 'close': b['c'], 'volume': b['v']
-            })
-
-        # Combine: History + Today (Full Series)
-        full_data = hist_5min + today_bars_std
-        
-        df_5m = pd.DataFrame(full_data)
-        df_5m = df_5m.drop_duplicates('timestamp').sort_values('timestamp')
-        
-        # Resample for Parent (15m Hierarchy)
-        df_15m = self._resample_to_15m(df_5m)
-        
-        # 2. RUN ENGINE
         # Check if in trade for UPnL logging
         current_trade = trade_ledger.get_open_position()
         
-        try:
-            # Call engine silently if we plan to manually print a unified log
-            analysis = self.engine.process_tick(df_5m, df_15m, silent=True)
-        except Exception as e:
-            logger.error(f"   [ATLAS] ❌ Inference Error: {e}")
-            return
+        # 1. Blackwell Persistence Check (v4.4.2)
+        # Use String Keys to bypass Timezone Object Hell
+        ts_key = ts.strftime('%Y-%m-%d %H:%M:%S')
+        
+        if self._batch_signals and ts_key in self._batch_signals:
+            df_5m, df_15m = None, None # Skip heavy DF building
+            cached = self._batch_signals[ts_key]
+            # Form standard analysis result to bypass ResearchEngine compute
+            analysis = {
+                'regime_id': f"{int(cached['c15'])}:{int(cached['c5'])}",
+                'features_5m': cached, # Contains all X01-X64
+                'decision': None, # RiskGuard must be called in real-time (path dependent)
+                'timestamp': ts
+            }
             
+            # Identify Clusters (Extracted for RiskGuard)
+            c15, c5 = int(cached['c15']), int(cached['c5'])
+            regime_id = analysis['regime_id']
+            
+            # Registry Lookup
+            alpha_state = self.engine.registry.get_alpha_state(c15, c5, cutoff_time=ts)
+            
+            # RiskGuard Decision (MUST be sequential)
+            # Ensure daily counters are reset if day changed (Backtest Specific Patch)
+            self.engine.update_daily_state(ts)
+            
+            decision = self.engine.risk_guard.validate_alpha(
+                alpha_state, message['close'], current_time=ts,
+                daily_trade_count=self.engine.daily_count,
+                consecutive_losses=self.engine.daily_losses
+            )
+            
+            analysis['decision'] = decision
+            wr = alpha_state.get('win_rate', 0.0)
+            res_color = "\033[92m" if decision['action'] != "HOLD" else "\033[0m"
+            analysis['log_str'] = f"[ATLAS-GPU] 🧠 {ts_str} | Price: {message['close']:,.2f} | Regime: {regime_id} | WR: {wr:.2f} | Action: {res_color}{decision['action']}\033[0m"
+            analysis['alpha_state'] = alpha_state
+            
+        else:
+            # Fallback to standard flow (CPU or Live data)
+            # 1. Prepare DataFrames for Engine
+            # Retrieve historical context (list of dicts)
+            hist_5min = self.daily_context.get('last_5min', [])
+            
+            # Today's bars (Normalize keys to match hist_5min)
+            from data.database import IST
+            today_bars_std = []
+            for b in self.today_bars:
+                dt = pd.to_datetime(b['ts'])
+                if dt.tzinfo is None:
+                    dt = dt.tz_localize('Asia/Kolkata') # Assume IST for backtest local strings
+                today_bars_std.append({
+                    'timestamp': dt,
+                    'open': b['o'], 'high': b['h'], 'low': b['l'], 'close': b['c'], 'volume': b['v']
+                })
+
+            # Combine: History + Today (Full Series)
+            full_data = hist_5min + today_bars_std
+            
+            df_5m = pd.DataFrame(full_data)
+            df_5m = df_5m.drop_duplicates('timestamp').sort_values('timestamp')
+            
+            # Resample for Parent (15m Hierarchy)
+            df_15m = self._resample_to_15m(df_5m)
+
+            try:
+                analysis = self.engine.process_tick(df_5m, df_15m, silent=True)
+            except Exception as e:
+                logger.error(f"   [ATLAS] ❌ Inference Error: {e}")
+                return
+
         decision = analysis.get('decision', {})
         signal = decision.get('action', 'HOLD')
         regime_id = analysis.get('regime_id', 'UNKNOWN')
         log_str = analysis.get('log_str', '')
 
         # 3. UNIFIED LOGGING (Continuous Time Series)
+        # Add Balance Always
+        cur_bal = self.broker.get_balance()
+        
+        # Calculate UPnL for Open Equity
+        upnl_rupees = 0.0
+        upnl_pts = 0.0
+        
         if current_trade:
              # Calculate UPnL
              price = message['close']
-             upnl = (price - current_trade.entry_price) if current_trade.direction == "CALL" else (current_trade.entry_price - price)
-             color = "\033[92m" if upnl >= 0 else "\033[91m"
+             upnl_pts = (price - current_trade.entry_price) if current_trade.direction == "CALL" else (current_trade.entry_price - price)
+             
+             # Calculate Rupee Value (using delta/multiplier check, or standard lot)
+             # Config checks
+             delta = config.get('GLOBAL.OPTIONS_DELTA', 0.55)
+             multiplier = current_trade.quantity * delta
+             upnl_rupees = upnl_pts * multiplier
+
+             color = "\033[92m" if upnl_pts >= 0 else "\033[91m"
              # Append UPnL to the engine's log_str
-             log_str += f" | {color}UPnL: {upnl:+.1f}\033[0m"
+             log_str += f" | {color}UPnL: {upnl_pts:+.1f}\033[0m"
         
-        logger.info(log_str)
+        # log_str += f" | Bal: {cur_bal:,.0f}" # Balance is closed equity
+        # logger.info(f"[TRACE-LINEAR] {ts.strftime('%Y-%m-%d')} | {log_str}")
+        
+        # --- EQUITY CURVE RECORDER (User Request) ---
+        total_equity = cur_bal + upnl_rupees
+        self.equity_curve.append({
+            'timestamp': ts.strftime('%Y-%m-%d %H:%M:%S'), # Use string for CSV or object? Object better for DataFrame
+            'equity': total_equity,
+            'balance': cur_bal,
+            'upnl': upnl_rupees
+        })
         
         # 4. TRADE MANAGEMENT (Transition Engine)
         if current_trade:
             trade = current_trade
+            trade.duration_bars = getattr(trade, 'duration_bars', 0) + 1 # v4.3 Time Decay Tracker
             
             # MFE/MAE Tracking (v4.0 Performance Fix)
             trade_ledger.update_price_extremes(trade.trade_id, message['close'])
             trade_ledger.update_price_extremes(trade.trade_id, message['high'])
             trade_ledger.update_price_extremes(trade.trade_id, message['low'])
 
+            # Live Update of MFE/MAE on Trade Object (Critical for Stale Exit)
+            high = trade_ledger.daily_high_prices.get(trade.trade_id, trade.entry_price)
+            low = trade_ledger.daily_low_prices.get(trade.trade_id, trade.entry_price)
+            
+            if trade.direction == "CALL":
+                trade.mfe = high - trade.entry_price
+                trade.mae = trade.entry_price - low
+            else:
+                trade.mfe = trade.entry_price - low
+                trade.mae = high - trade.entry_price
+
             # Multiplier Constants
             delta = config.get('GLOBAL.OPTIONS_DELTA', 0.55)
             multiplier = trade.quantity * delta
 
+            # Break-Even Trail Logic (User Request Check)
+            be_cfg = config.get('RISK_RULES.break_even_trail', {})
+            if be_cfg.get('enabled', False):
+                trigger = be_cfg.get('trigger_mfe', 25.0)
+                offset = be_cfg.get('offset', 0.0)
+                
+                # If current MFE exceeds trigger, move SL to Entry + Offset
+                if trade.mfe >= trigger:
+                    new_sl = trade.entry_price + offset if trade.direction == "CALL" else trade.entry_price - offset
+                    
+                    # Logic to ensure we don't relax the stop (only tighten)
+                    if trade.direction == "CALL":
+                        if new_sl > trade.sl_price:
+                            trade.sl_price = new_sl
+                            # logger.info(f"   [RISK] 🛡️ BE Triggered (MFE {trade.mfe:.1f} > {trigger}). SL -> {new_sl}")
+                    else:
+                        if new_sl < trade.sl_price:
+                            trade.sl_price = new_sl
+                            
             # Transition Monitor (Adaptive Exit: Regime Decay / Trap)
-            monitor = self.engine.process_in_trade_tick(df_5m, df_15m, trade)
+            monitor = self.engine.process_in_trade_tick(df_5m, df_15m, trade, pre_computed_result=analysis, current_price=message['close'])
             if monitor.get('in_trade_action') == "EXIT":
                 pts = (message['close'] - trade.entry_price) if trade.direction == "CALL" else (trade.entry_price - message['close'])
                 pnl_rupees = pts * multiplier
+                
+                # v4.4 Differentiate Exit Reasons
+                reason_str = monitor.get('reason', "")
+                exit_reason = ExitReason.INVALIDATION
+                if "Stale" in reason_str:
+                    exit_reason = ExitReason.STALE
+                elif "Jitter" in reason_str:
+                    exit_reason = ExitReason.JITTER
+                
                 exit_event = ExitEvent(
                     trade_id=trade.trade_id, exit_time=ts, exit_price=message['close'],
-                    exit_reason=ExitReason.INVALIDATION, # Unified with current exit logics
-                    pnl_points=pts, pnl_rupees=pnl_rupees, bars_held=0, mfe=0, mae=0
+                    exit_reason=exit_reason,
+                    pnl_points=pts, pnl_rupees=pnl_rupees, bars_held=trade.duration_bars, mfe=trade.mfe, mae=trade.mae
                 )
                 self.lifecycle.close_trade(trade.trade_id, exit_event)
+                
+                # v4.4 Churn Brake Tracking
+                if pts < 0:
+                    self.engine.daily_losses += 1
+                else:
+                    self.engine.daily_losses = 0
                 return
 
             # SL/Target Check (Deterministic)
@@ -246,6 +452,12 @@ class BacktestMode(BaseMode):
                 pnl_rupees = pts * multiplier
                 event = ExitEvent(trade.trade_id, ts, exit_price, exit_reason, pts, pnl_rupees)
                 self.lifecycle.close_trade(trade.trade_id, event)
+
+                # v4.4 Churn Brake Tracking
+                if pts < 0:
+                    self.engine.daily_losses += 1
+                else:
+                    self.engine.daily_losses = 0
         
         else:
             # 4. ENTRY LOGIC
@@ -267,6 +479,34 @@ class BacktestMode(BaseMode):
                 trade = self.lifecycle.propose_trade(decision, ctx, ts)
                 trade.metadata['is_fallback'] = decision.get('is_fallback', False)
                 self.lifecycle.open_trade(trade)
+                self.engine.daily_count += 1  # v4.3 Daily Limit Tracker
+            
+            elif signal == "HOLD" and any(k in decision.get('reason', "") for k in ["Risk", "Brake", "Sterilization", "Darwinian", "Probation"]):
+                # v4.4 Tracking Counterfactuals (Blocked signals)
+                # If it's a HOLD due to risk, but we have a bias (BUY_CALL/PUT) in alpha_state
+                alpha_bias = analysis.get('alpha_state', {}).get('bias', 'NONE')
+                if alpha_bias in ["LONG", "SHORT"]:
+                    ghost_action = "BUY_CALL" if alpha_bias == "LONG" else "BUY_PUT"
+                    ghost_decision = decision.copy()
+                    ghost_decision['action'] = ghost_action
+                    
+                    ctx = {
+                        'symbol': self.symbol,
+                        'close': message['close'],
+                        'regime_id': regime_id,
+                        'is_fallback': decision.get('is_fallback', False),
+                        'atr': 0.0
+                    }
+                    
+                    # Propose as Counterfactual
+                    trade = self.lifecycle.propose_trade(ghost_decision, ctx, ts)
+                    trade.is_counterfactual = True
+                    trade.block_reason = decision.get('reason')
+                    # We 'Open' and 'Close' it immediately in simulation logic? 
+                    # No, we just need the record for the report. 
+                    # Actually, to get 'Counterfactual PnL', we'd need to track its lifecycle.
+                    # For now, just recording the rejection count and reason is the priority.
+                    self.lifecycle.open_trade(trade)
 
     def _run_simulation(self):
         current_date = self.start_date

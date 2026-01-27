@@ -89,7 +89,8 @@ class TradeReporter:
             "counterfactuals": {
                 "trades": len(closed_ghosts),
                 "net_pnl": ghost_pnl,
-                "win_rate": ghost_wr
+                "win_rate": ghost_wr,
+                "block_reasons": self._compute_block_reasons(ghost_trades)
             },
             "top_losers": top_losers,
             "verdict": verdict
@@ -243,6 +244,13 @@ class TradeReporter:
                 "conclusion": conclusion
             })
         return diagnostics
+
+    def _compute_block_reasons(self, ghost_trades: List[Dict]) -> Dict[str, int]:
+        reasons = {}
+        for t in ghost_trades:
+            br = t.get('block_reason', 'Unknown Risk')
+            reasons[br] = reasons.get(br, 0) + 1
+        return reasons
 
     def _compute_daily_map(self, summaries: List[DailySummary]) -> List[Dict]:
         if not summaries: return []
@@ -412,10 +420,30 @@ class TradeReporter:
         print(f"Profit Giveback       : {giveback_color}{q['profit_giveback_ratio']:.1f}%{C_RESET}")
         print(f"Exit Efficacy         : {q['exit_efficiency_score']:.1f}%")
 
+        # New Forensic Exit Breakdown (v4.4)
+        print(f"\n{C_YELLOW}5.1 FORENSIC EXIT BREAKDOWN (v4.4){C_RESET}")
+        print("-" * 40)
+        ex_dist = d.get('exit_reason', {})
+        for reason, count in ex_dist.items():
+            # Check for Enum value or string name
+            r_name = reason.name if hasattr(reason, 'name') else str(reason)
+            if r_name in ["STALE", "JITTER"]:
+                print(f"{r_name:<10} Exits : {C_CYAN}{count}{C_RESET}")
+
         o = report['opportunity_cost']
+        c = report['counterfactuals']
         print(f"\n{C_YELLOW}6. SYSTEM VITALITY & VERDICT{C_RESET}")
         print("-" * 40)
         print(f"Participation Rate    : {o['participation_rate']:.1f}%")
+        
+        # New Block Reason Summary (v4.4)
+        if c['trades'] > 0:
+            print(f"Risk-Blocked Signals : {C_RED}{c['trades']}{C_RESET}")
+            for br, bcount in c.get('block_reasons', {}).items():
+                short_br = br.split(":")[0] if ":" in br else br
+                color = C_YELLOW if "Sterilization" in short_br else ""
+                print(f"  -> {color}{short_br:<20} : {bcount}{C_RESET}")
+
         print(f"System Health         : {C_CYAN}{v['status']}{C_RESET}")
         print(f"Diagnosis             : {v['primary']}")
         print(f"Prescription          : {C_YELLOW}{v['action']}{C_RESET}")

@@ -95,14 +95,6 @@ def get_engine(mode, args=None):
             )
             emit_telegram_signal("STATUS", {"msg": "✅ Data Ready. Starting Simulation..."})
             
-            # 2. Return Engine Instance
-            return EngineClass(
-                start_date=start_date,
-                end_date=end_date,
-                symbol=symbol,
-                resolution=res,
-                initial_balance=args.balance if args else 30000
-            )
         except Exception as e:
             # Emit Warning Status
             err_msg = str(e).replace('"', "'")
@@ -110,6 +102,16 @@ def get_engine(mode, args=None):
             logging.warning(f"⚠️ Prefill failed (Simulation will proceed with existing data): {e}")
             if mode != 'backtest':
                 raise e # CRITICAL for Live/Mock, but Non-Fatal for Backtest
+        
+        # 2. Return Engine Instance (Always)
+        return EngineClass(
+            start_date=start_date,
+            end_date=end_date,
+            symbol=symbol,
+            resolution=res,
+            initial_balance=args.balance if args else 30000,
+            use_gpu=args.gpu if args else False
+        )
         
     elif mode == 'mock':
         from engine.modes.live import LiveMode
@@ -137,6 +139,7 @@ if __name__ == "__main__":
     parser.add_argument("--chat-id", type=str, default=os.getenv("TELEGRAM_CHAT_ID"), help="Telegram Chat ID for notifications")
     parser.add_argument("--debug-schedule", action="store_true", help="Fast schedule for debugging")
     parser.add_argument("--validate-auth", action="store_true", help="Only validate auth and exit")
+    parser.add_argument("--gpu", action="store_true", help="Enable VRAM (GPU) Acceleration via RAPIDS")
     
     args = parser.parse_args()
 

@@ -150,8 +150,9 @@ def fetch_context_data(timestamp, symbol="NIFTY", resolution=None):
     start_30d = (ts_utc - timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
     start_7d = (ts_utc - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
     
-    # Debug logs (Keep them for now, user found them useful)
-    print(f"\n[DB] Fetching context for {symbol} | Target: {ts_str} | Res: {resolution}")
+    # Debug logs (Clarified Timezones v4.2)
+    ts_ist_str = ts_utc.replace(tzinfo=UTC).astimezone(IST).strftime('%Y-%m-%d %H:%M:%S')
+    print(f"\n[DB] Fetching context for {symbol} | Target: {ts_str} (UTC) / {ts_ist_str} (IST) | Res: {resolution}")
         
     conn = get_connection()
     
