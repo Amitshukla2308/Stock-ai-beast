@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 IST = pytz.timezone('Asia/Kolkata')
 UTC = pytz.utc
 
-DB_PATH = os.path.join("data", "trading.db")
+DB_NAME = os.getenv("BEAST_DB_NAME", "trading.db")
+DB_PATH = os.path.join("data", DB_NAME)
 
 SYMBOL_MAP = {
     "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
@@ -19,11 +20,13 @@ def get_fyers_symbol(symbol):
     """Map internal names to Fyers tickers."""
     return SYMBOL_MAP.get(symbol, symbol)
 
-def get_connection():
+def get_connection(db_name=None):
     """
     Returns a connection to the SQLite database with busy timeout.
     """
-    db_path = os.path.abspath(DB_PATH)
+    actual_db = db_name if db_name else DB_NAME
+    db_path = os.path.join("data", actual_db)
+    db_path = os.path.abspath(db_path)
     
     # Common container paths fallback
     if not os.path.exists(db_path):
@@ -31,7 +34,7 @@ def get_connection():
             if os.path.exists(alt_path):
                 db_path = os.path.abspath(alt_path)
                 break
-
+    
     # Ensure directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
@@ -129,6 +132,73 @@ def init_db():
                 PRIMARY KEY (timestamp, symbol)
             )
         """)
+
+        # 5. Market Data (Bootstrap Schema for Fresh Environments)
+        # Required for Mock Mode / First-Time Setup on simulation.db
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candles_1min (
+                timestamp TEXT,
+                symbol TEXT,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume REAL,
+                PRIMARY KEY (timestamp, symbol)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candles_5min (
+                timestamp TEXT,
+                symbol TEXT,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume REAL,
+                PRIMARY KEY (timestamp, symbol)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candles_15min (
+                timestamp TEXT,
+                symbol TEXT,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume REAL,
+                PRIMARY KEY (timestamp, symbol)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candles_1day (
+                timestamp TEXT,
+                symbol TEXT,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume REAL,
+                PRIMARY KEY (timestamp, symbol)
+            )
+        """)
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candles_vix (
+                timestamp TEXT,
+                symbol TEXT,
+                open REAL,
+                high REAL,
+                low REAL,
+                close REAL,
+                volume REAL,
+                PRIMARY KEY (timestamp, symbol)
+            )
+        """)
         
         conn.commit()
     finally:
@@ -154,6 +224,7 @@ def fetch_context_data(timestamp, symbol="NIFTY", resolution=None):
     ts_ist_str = ts_utc.replace(tzinfo=UTC).astimezone(IST).strftime('%Y-%m-%d %H:%M:%S')
     print(f"\n[DB] Fetching context for {symbol} | Target: {ts_str} (UTC) / {ts_ist_str} (IST) | Res: {resolution}")
         
+    # Use dynamic DB connection (respects BEAST_DB_NAME env var)
     conn = get_connection()
     
     # Smart Table Detection
@@ -295,8 +366,11 @@ def fetch_context_data(timestamp, symbol="NIFTY", resolution=None):
         
         def to_ist_str(ts_val):
             if ts_val is None: return None
-            # SQLite datetime strings are already UTC naive
-            dt = datetime.fromisoformat(ts_val).replace(tzinfo=UTC)
+            # Use robust parsing for mixed naive/aware strings
+            from dateutil import parser
+            dt = parser.parse(ts_val)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
             return dt.astimezone(IST).strftime('%Y-%m-%d %H:%M:%S')
 
         context = {
@@ -523,7 +597,7 @@ def retrieve_relevant_nuggets(tags: list, cutoff_time: datetime, limit=5):
         
     ts_str = ts_utc.strftime('%Y-%m-%d %H:%M:%S')
     
-    conn = get_connection()
+    conn = get_connection("trading.db")
     try:
         query = """
             SELECT created_at, category, lesson, condition_tags, call_pnl, put_pnl, hold_pnl, vix, regime_id

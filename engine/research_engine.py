@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class ResearchEngine:
     def __init__(self, wr_floor: float = 0.55, use_gpu: bool = False):
-        logger.info(f"🧠 Initializing v4.4 Research Engine (Sovereign Architecture | GPU={use_gpu})...")
+        logger.info(f"🧠 Initializing v6.2 Research Engine (Sovereign Architecture | GPU={use_gpu})...")
         self.physics = PhysicsEngine()
         self.use_gpu = use_gpu
         
@@ -109,6 +109,46 @@ class ResearchEngine:
             "log_str": log_str
         }
 
+    def get_trade_context(self, packet: Dict[str, Any], symbol: str, close: float, mode: str = "BACKTEST") -> Dict[str, Any]:
+        """
+        Sovereign v4.0: Standardized context extractor.
+        Bridges 64D features to Trade Record fields.
+        """
+        features = packet.get('features_5m', {})
+        decision = packet.get('decision', {})
+        
+        # 1. Session Phase (X61: Progress 0.0 -> 1.0)
+        prog = features.get('X61_Session_Prog', 0.5)
+        if prog < 0.25: phase = f"{mode}_MORNING"
+        elif prog > 0.75: phase = f"{mode}_LATE"
+        else: phase = f"{mode}_MID"
+        
+        # 2. Location (X01: Pivot, X02: VWAP)
+        p_dist = abs(features.get('X01_Pivot_Dist', 1.0))
+        v_dist = abs(features.get('X02_VWAP_Dist', 1.0))
+        
+        if p_dist < 0.2: location = "PIVOT_ANCHOR"
+        elif v_dist < 0.2: location = "VWAP_ANCHOR"
+        else: location = "OPEN_SPACE"
+        
+        return {
+            'symbol': symbol,
+            'close': close,
+            'regime_id': packet.get('regime_id', 'UNKNOWN'),
+            'is_fallback': decision.get('is_fallback', False),
+            'session_phase': phase,
+            'trend_efficiency': features.get('X07_Efficiency', 0.0),
+            'atr': features.get('atr', 0.0),
+            'or_range': features.get('X62_Gap_Size', 0.0),
+            'location_class': location,
+            'velocity': features.get('X04_Mom_1H', 0.0),
+            'entropy_price': features.get('X20_Entropy', 0.0),
+            'accel': features.get('X10_Acceleration', 0.0),
+            'ter': features.get('X07_Efficiency', 0.0),
+            'system_version': "v6.2-SOVEREIGN",
+            'config_hash': "DEFAULT_SOVEREIGN"
+        }
+
     def process_in_trade_tick(self, df_5m: pd.DataFrame, df_15m: pd.DataFrame, trade: Any, pre_computed_result: Optional[Dict[str, Any]] = None, current_price: float = 0.0) -> Dict[str, Any]:
         """
         Transition Engine: In-Trade Monitor.
@@ -127,6 +167,16 @@ class ResearchEngine:
         if not trade:
              return {"in_trade_action": "HOLD", "reason": "No Trade", "confidence": 0.0}
 
+        # Blackwell Patch: Use passed price if df_5m is None
+        if current_price == 0.0 and df_5m is not None:
+             current_price = df_5m['close'].iloc[-1]
+        
+        pnl_pts = current_price - trade.entry_price if trade.direction == "CALL" else trade.entry_price - current_price
+
+        # v4.4 Populate Physics Exit Status (Spec-002)
+        trade.pnl_edge_death = pnl_pts
+        trade.edge_death_bar = getattr(trade, 'bars_held', 0)
+        
         # Transition Logic (The "Regime Decay" Guard)
         # Hysteresis Implementation (v4.2 Fix)
         # We require N consecutive bars of "Trap" conditions to trigger exit.

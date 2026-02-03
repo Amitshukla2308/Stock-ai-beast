@@ -27,8 +27,8 @@ class RiskGuard:
 
     def validate_alpha(self, alpha_state: Dict[str, Any], current_price: float, current_time: Any = None, daily_trade_count: int = 0, consecutive_losses: int = 0) -> Dict[str, Any]:
         """
-        Validates the confluence bias and sets exit prices.
-        Now supports Morning WR Floor overrides and Daily Loss Churn Brakes (v4.4).
+        v4.2 Sovereign: The Decision Gate.
+        Enforces 0.55 WR Floor and Golden Morning Access.
         """
         bias = alpha_state.get("bias", "NONE")
         wr = alpha_state.get("win_rate", 0.0)
@@ -36,185 +36,152 @@ class RiskGuard:
         is_fallback = alpha_state.get("is_fallback", False)
         
         decision = {
-            "action": "HOLD",
-            "confidence": wr,
-            "selected_style": "ATLAS",
-            "is_fallback": is_fallback,
-            "size_factor": 1,
-            "reason": f"Cluster {conf_id}",
-            "sl": None,
-            "target": None
+            "action": "HOLD", "confidence": wr, "selected_style": "ATLAS",
+            "is_fallback": is_fallback, "size_factor": 1,
+            "reason": f"Cluster {conf_id}", "sl": None, "target": None
         }
 
         if bias == "NONE":
             decision["reason"] = f"No Alpha for {conf_id}"
             return decision
 
-        # 0. EARLY GEOMETRY (Before Limits)
-        # Ensure SL/TGT are set for Counterfactuals regardless of Veto
-        if bias in ["LONG", "SHORT"]:
-            self._set_geometry(decision, bias, current_price, alpha_state.get("tier", 2))
+        # 0. GEOMETRY (Ghosts & Trades)
+        self._set_geometry(decision, bias, current_price, alpha_state)
 
         # 1. LOAD CONFIG
-        blocks = config.get("FORENSIC_BLOCKS", {})
-        sem_cfg = config.get("SEMANTIC_RISK_GUARD", {})
+        # v4.5 Unified Block Logic
+        blocked_cfg = config.get("BLOCKED_REGIMES", {})
         risk_caps = config.get("RISK_CAPS", {})
+        amp_cfg = config.get("ALPHA_AMPLIFICATION", {})
+        golden_set = set(amp_cfg.get("golden_regimes", []))
 
-        # 2. DAILY LIMITS & CHURN BRAKE (v4.4 Surgical Hardening)
-        # Churn Brake: Stop if first N are losses
-        loss_cfg = risk_caps.get("daily_loss_limit", {})
-        max_losses = loss_cfg.get("max_consecutive_losses", 2)
-        if consecutive_losses >= max_losses:
-            decision["reason"] = f"Churn Brake: {max_losses} consecutive losses reached"
-            return decision
-
-        # Trade Count Limits
-        max_hard = risk_caps.get("max_daily_trades", 3)
-        soft_cap = risk_caps.get("soft_limit", 2)
-        
-        if daily_trade_count >= max_hard:
-            decision["reason"] = f"Risk Cap: Hard Limit {max_hard} reached"
-            return decision
-            
-        if daily_trade_count >= soft_cap:
-            # Check for Morning Window Override
-            morning = risk_caps.get("morning_window", {})
-            in_morning = False
-            
-            if current_time:
-                ts_str = current_time.strftime('%H:%M') if hasattr(current_time, 'strftime') else str(current_time)[11:16]
-                if morning.get("start", "09:15") <= ts_str <= morning.get("end", "10:45"):
-                    in_morning = True
-            
-            min_alpha = morning.get("wr_floor_override", 0.50) if in_morning else risk_caps.get("soft_limit_wr_floor", 0.65)
-            
-            if wr < min_alpha:
-                reason_tag = "Morning Window" if in_morning else "Soft Limit"
-                decision["reason"] = f"Risk Cap: {reason_tag} requires WR > {min_alpha}"
-                return decision
-
-        # 3. FORENSIC BLOCKS & STERILIZATION (v4.5)
-        # Extract c15:c5 from conf_id (Handles "LONG_15_18", "STAT_15_18", etc.)
+        # regime_tag Extraction (Handles LONG_15_18, STAT_15_18, etc.)
         regime_tag = "UNKNOWN"
         try:
             parts = conf_id.split("_")
-            if len(parts) >= 3:
-                regime_tag = f"{parts[-2]}:{parts[-1]}"
+            if len(parts) >= 3: regime_tag = f"{parts[-2]}:{parts[-1]}"
         except Exception: pass
 
-        # Hard Regime Block (Existing Forensic Logic)
-        if regime_tag in blocks.get("regimes", []):
+        # 2. HARD BLOCKS (Unified)
+        if regime_tag in blocked_cfg.get("regimes", []):
             decision["reason"] = f"Forensic Block: Toxic Regime {regime_tag}"
             return decision
-            
-        # Surgical Sterilization (v4.5)
-        steril_cfg = config.get("REGIME_STERILIZATION", {})
         
-        # 1. Hard Block (New)
-        if regime_tag in steril_cfg.get("block_list", []):
-             decision["reason"] = f"Surgical Pruning: Hard Veto {regime_tag}"
-             return decision
+        # 3. TIME-BASED BLOCKS (Future Optionality)
+        current_ts_str = alpha_state.get('timestamp_str', '') # Or handle datetime
+        # if current_ts_str in blocked_cfg.get("time_windows", []): ...
 
-        # 2. Soft Toxic List
-        if regime_tag in steril_cfg.get("toxic_regimes", []):
-            veto_wr = steril_cfg.get("sterilization_wr_floor", 0.70)
-            if wr < veto_wr:
-                decision["reason"] = f"Regime Sterilization: {regime_tag} requires WR > {veto_wr}"
-                return decision
-        
-        # 3. Darwinian Tier Policies (v6.1)
-        tier = alpha_state.get("tier", 2)
-        
-        # Tier 4: Blocked (Hard Veto)
-        if tier == 4:
-            decision["reason"] = f"Darwinian Block: {regime_tag} failed survival"
+        # 3. WIN RATE FLOOR (Sovereign Core)
+        # v4.2 Strictly enforce Research Floor (0.55)
+        if wr < self.wr_floor:
+            decision["reason"] = f"Veto: WR {wr:.2f} < Floor {self.wr_floor}"
             return decision
 
-        # Tier 3: Probation (Penalized Sizing + Rehab Gate)
-        if tier == 3:
-            prob_wr_gate = 0.45 # Allow recovery attempts
-            if wr < prob_wr_gate:
-                decision["reason"] = f"Probation Gate: {regime_tag} failed Rehab WR {prob_wr_gate}"
-                return decision
-            decision["size_factor"] = 0.5
-            decision["reason"] += " [PROBATION_PENALTY]"
+        # 4. OPERATIONAL FILTERS (Daily Limits / Windows)
+        # Churn Brake
+        max_losses = risk_caps.get("daily_loss_limit", {}).get("max_consecutive_losses", 2)
+        if consecutive_losses >= max_losses:
+            decision["reason"] = f"Churn Brake: {max_losses} losses reached"
+            return decision
 
-        # Tier 1: Golden (Amplified)
-        elif tier == 1:
-            decision["size_factor"] = 2.0
-            decision["reason"] += " [GOLDEN_BOOST]"
+        # Daily Trade Limit
+        max_hard = risk_caps.get("max_daily_trades", 10)
+        if daily_trade_count >= max_hard:
+            decision["reason"] = f"Risk Cap: Hard Limit {max_hard} reached"
+            return decision
 
-        # Tier 2: Standard (v5.3/v6.0 Fallback for non-live or non-categorized)
-        elif regime_tag in config.get("ALPHA_AMPLIFICATION", {}).get("golden_regimes", []):
-             decision["size_factor"] = config.get("ALPHA_AMPLIFICATION", {}).get("size_multiplier", 2)
-             decision["reason"] += " [GOLDEN_AMPLIFIED]"
-            
-        # 4. TIME GATE
+        # Time Windows
         if current_time:
-            # Parse time if needed, assuming datetime object or string? 
-            # Engine passes pandas timestamp or python datetime.
-            # Convert to HH:MM string for comparison
-            time_str = current_time.strftime('%H:%M') if hasattr(current_time, 'strftime') else str(current_time)[11:16]
-                
-            for window in blocks.get("time_windows", []):
-                start = window.get("start", "00:00")
-                end = window.get("end", "00:00")
-                min_conf = window.get("min_confidence", 1.0)
-                
-                if start <= time_str < end:
-                    # In restricted window. Check confidence exception.
-                    if wr < min_conf:
-                        decision["reason"] = f"Time Gate: Restricted window WR veto"
-                        return decision
-
-        # 5. SEMANTIC VETO (v4.3 Exhaustion Protection)
-        # Check if cluster driver contains exhaustion features
-        try:
-            parts = conf_id.split("_")
-            c5_id = parts[-1]
-            drivers = self.drivers.get("5m", {}).get(c5_id, [])
+            ts_str = current_time.strftime('%H:%M') if hasattr(current_time, 'strftime') else str(current_time)[11:16]
             
-            exh_cfg = sem_cfg.get("exhaustion_veto", {})
-            if exh_cfg.get("enabled", True):
-                exh_features = exh_cfg.get("features", [])
-                wr_veto = exh_cfg.get("wr_floor_override", 0.65)
+            # Morning Window (Gaps/Reversals) - GOLDEN ONLY
+            morning = risk_caps.get("morning_window", {})
+            if morning.get("start") <= ts_str <= morning.get("end"):
+                # Golden Regimes have priority morning access
+                if regime_tag not in golden_set:
+                    decision["reason"] = f"Execution Veto: Morning Window requires Golden Regime. Current: {regime_tag}"
+                    return decision
                 
-                for d in drivers:
-                    if d['feature'] in exh_features and d['sign'] == 'HIGH':
-                        if wr < wr_veto:
-                            decision["reason"] = f"Semantic Veto: High Exhaustion requires WR > {wr_veto}"
-                            return decision
-        except Exception: pass
+                min_alpha = morning.get("wr_floor_override", 0.60)
+                if wr < min_alpha:
+                    decision["reason"] = f"Execution Veto: Morning Golden requires WR > {min_alpha}"
+                    return decision
 
-        # Absolute Code Floor (v5.0 Reset)
-        if wr < 0.0:
-            decision["reason"] = f"Veto: WR {wr:.2f} < 0.0"
-            return decision
+            # Lunch Break (Low Liquidity)
+            lunch = risk_caps.get("lunch_break", {})
+            if lunch and lunch.get("start") <= ts_str <= lunch.get("end"):
+                if regime_tag not in golden_set:
+                    decision["reason"] = f"Execution Veto: Lunch Break requires Golden Regime."
+                    return decision
 
-        # 6. Final Geometry & Action Attribution
-        
-        if bias == "LONG":
-            decision["action"] = "BUY_CALL"
-        elif bias == "SHORT":
-            decision["action"] = "BUY_PUT"
+            # EOD Filter
+            late_filt = risk_caps.get("late_closing_filter", {})
+            if late_filt and late_filt.get("start") <= ts_str <= late_filt.get("end"):
+                decision["reason"] = f"Execution Veto: EOD Filter ({ts_str})"
+                return decision
+
+        # 5. AMPLIFICATION
+        if regime_tag in golden_set:
+             decision["size_factor"] = amp_cfg.get("size_multiplier", 2)
+             decision["reason"] += " [GOLDEN_AMPLIFIED]"
+
+        # 6. ACTION ATTRIBUTION
+        if bias == "LONG": decision["action"] = "BUY_CALL"
+        elif bias == "SHORT": decision["action"] = "BUY_PUT"
 
         return decision
 
-    def _set_geometry(self, decision, bias, current_price, tier: int = 2):
-        """Standardized SL/TGT calculator for both real and ghost trades."""
-        from config.config_loader import config # Defensive Import
-        exit_cfg = config.get("EXIT_STRATEGY", {})
-        target_offset = exit_cfg.get("fixed_target_points", 90.0) if exit_cfg.get("target_type") == "FIXED" else 10000.0
+    def _set_geometry(self, decision, bias, current_price, alpha_state: Dict[str, Any]):
+        """
+        v4.5 Sovereign Geometry:
+        - Standard: 50 SL / 90 TGT
+        - Probation: Dynamic (Avg MAE / Avg MFE) from Alpha State (Tightened)
+        - Alpha Expansion: 50 SL / 125 TGT (High MFE)
+        """
+        # Default Standard
+        sl_offset = 50.0
+        target_offset = 90.0
         
-        # v6.1 Darwinian Rehab Exit (Smaller targets for Tier 3)
-        if tier == 3:
-            target_offset = target_offset * 0.5 # Catch small wins
-            decision["reason"] += " [REHAB_TARGET]"
+        # Identify Regime
+        conf_id = alpha_state.get("confluence_id", "UNKNOWN")
+        regime_tag = "UNKNOWN"
+        try:
+            parts = conf_id.split("_")
+            if len(parts) >= 3: regime_tag = f"{parts[-2]}:{parts[-1]}"
+        except Exception: pass
+        
+        # Load Configs
+        from config.config_loader import config
+        probation_cfg = config.get("PROBATION_REGIMES", {})
+        
+        # 1. Check Probation (Dynamic Tightening)
+        if regime_tag in probation_cfg.get("regimes", []):
+            # Fetch Dynamic Physics
+            dyn_sl = alpha_state.get('avg_mae', 0.0)
+            dyn_tgt = alpha_state.get('avg_mfe', 0.0)
             
-        # Semantic Target Modulation could be added here if needed for ghosts too
+            # Fallback to Config if missing
+            if dyn_sl <= 5.0: dyn_sl = probation_cfg.get("sl_points", 35.0)
+            if dyn_tgt <= 5.0: dyn_tgt = probation_cfg.get("target_points", 60.0)
+            
+            # Safety Clamps (Don't let stops be too tight or too loose)
+            # SL: Min 25 (Noise), Max 55 (Risk)
+            # TGT: Min 40 (B/E), Max 100 (Unlikely in probation)
+            sl_offset = max(25.0, min(55.0, dyn_sl))
+            target_offset = max(40.0, min(100.0, dyn_tgt))
+            
+            decision["reason"] += f" [PROBATION_DYN:{target_offset:.0f}/{sl_offset:.0f}]"
+            
+        # 2. Check Alpha Expansion (Loosen) - Only if NOT in probation
+        else:
+             avg_mfe = alpha_state.get('avg_mfe', 0)
+             if avg_mfe > 95: 
+                 target_offset = 125.0
+                 decision["reason"] += " [ALPHA_EXPAND]"
+        
         if bias == "LONG":
-            decision["sl"] = current_price - 50
+            decision["sl"] = current_price - sl_offset
             decision["target"] = current_price + target_offset
         elif bias == "SHORT":
-            decision["sl"] = current_price + 50
+            decision["sl"] = current_price + sl_offset
             decision["target"] = current_price - target_offset

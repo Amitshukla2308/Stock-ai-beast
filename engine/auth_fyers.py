@@ -292,6 +292,29 @@ def authenticate_fyers(headless_url=None, generate_url_only=False):
         log(f"❌ Auth Failed: {resp_json.get('message')}")
         raise Exception(f"Auth Failed: {resp_json}")
 
+def get_fyers_instance():
+    """Returns a ready-to-use FyersModel instance."""
+    from fyers_apiv3 import fyersModel
+    
+    client_id = os.getenv("FYERS_CLIENT_ID")
+    access_token = validate_token_file()
+    
+    if not access_token:
+        # Check environment as backup (e.g. for cloud runs)
+        access_token = os.getenv("FYERS_ACCESS_TOKEN")
+        
+    if not access_token:
+        log("❌ Cannot get Fyers Instance: No valid token found.")
+        return None
+        
+    fyers = fyersModel.FyersModel(
+        client_id=client_id, 
+        token=access_token, 
+        is_async=False, 
+        log_path=os.path.join(PROJ_ROOT, "logs_v2")
+    )
+    return fyers
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Fyers Auth Utility")

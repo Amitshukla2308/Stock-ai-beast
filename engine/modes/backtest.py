@@ -87,17 +87,28 @@ class BacktestMode(BaseMode):
         try:
             self._run_simulation()
         finally:
-            atlas_logger.flush()
-            # Generate Report
-            trade_reporter.generate_session_report(self.session_id, self.daily_summaries, llm_client=None)
+            # -------------------------------------------------------------
+            # v6.2-SOVEREIGN EOD REPORTING
+            # -------------------------------------------------------------
             
-            # Export Equity Curve
-            if self.equity_curve:
-                import pandas as pd
-                df_eq = pd.DataFrame(self.equity_curve)
-                path = f"data/equity_curve_{self.session_id}.csv"
-                df_eq.to_csv(path, index=False)
-                logger.info(f"📈 Equity Curve saved to: {path}")
+            # 1. Flush Logs
+            atlas_logger.flush()
+
+            # 2. Generate Session Report (PDF/Text)
+            trade_reporter.generate_session_report(
+                self.session_id, 
+                self.daily_summaries,
+                llm_client=None
+            )
+            
+            # 3. Plot Equity Curve
+            try:
+                from tests.plot_equity import plot_equity_curve
+                plot_equity_curve(self.session_id)
+            except ImportError:
+                pass
+                
+            logger.info(f"[BACKTEST] 🏁 Session {self.session_id} Complete.")
 
     def stop(self):
         self.running = False
@@ -105,7 +116,7 @@ class BacktestMode(BaseMode):
         atlas_logger.flush()
 
     def _on_day_ended(self, ts, last_close):
-        """Standard EOD Hook (v6.0: Includes Rolling Update)."""
+        """Standard EOD Hook."""
         summary = eod_processor.end_of_day(
             self.lifecycle, last_close, ts,
             llm_client=None, # No LLM summary
@@ -113,22 +124,6 @@ class BacktestMode(BaseMode):
             symbol=self.symbol,
             today_bars=self.today_bars
         )
-        
-        # v6.0 TheRealSimulation: Update brain's experience with today's simulation results
-        from data.database import get_connection
-        import pandas as pd
-        
-        conn = get_connection()
-        try:
-            # Fetch all trades for this specific backtest session so far
-            query = f"SELECT * FROM trades WHERE trade_id LIKE '{self.session_id}%'"
-            df_session = pd.read_sql_query(query, conn)
-            self.engine.registry.update_walk_forward_map(df_session)
-        except Exception as e:
-            logger.error(f"[BACKTEST] 🧠 v6.0 Learning Update Failed: {e}")
-        finally:
-            conn.close()
-
         return summary
 
     def _resample_to_15m(self, df_5m):
@@ -167,7 +162,7 @@ class BacktestMode(BaseMode):
         query_end = self.end_date + timedelta(days=1)
         
         from data.database import get_connection, get_fyers_symbol, IST
-        conn = get_connection()
+        conn = get_connection("trading.db")
         full_symbol = get_fyers_symbol(self.symbol)
         
         query = f"""
@@ -183,11 +178,13 @@ class BacktestMode(BaseMode):
         
         if df_all.empty: return
         
-        df_all['timestamp'] = pd.to_datetime(df_all['timestamp'])
-        # Handle timezones as in DataAdapter
-        if df_all['timestamp'].dt.tz is None:
-            df_all['timestamp'] = df_all['timestamp'].dt.tz_localize('UTC')
-        df_all['timestamp'] = df_all['timestamp'].dt.tz_convert(IST)
+        df_all['timestamp'] = pd.to_datetime(df_all['timestamp'], format='ISO8601', utc=True).dt.tz_convert(IST)
+        
+        # v6.3.8: Prune duplicates that may exist due to mixed timestamp formats in DB tail
+        initial_len = len(df_all)
+        df_all = df_all.drop_duplicates(subset=['timestamp'], keep='last')
+        if len(df_all) < initial_len:
+            logger.info(f"   [BLACKWELL] Pruned {initial_len - len(df_all)} duplicate bars from database.")
         
         from engine.features.calculators_gpu import AtlasFeaturesGPU
         from engine.features.physics_engine import PhysicsEngine
@@ -399,7 +396,40 @@ class BacktestMode(BaseMode):
                         if new_sl < trade.sl_price:
                             trade.sl_price = new_sl
                             
-            # Transition Monitor (Adaptive Exit: Regime Decay / Trap)
+            # 4. DETERMINISTIC SAFETY (SL/Target Check) - Priority v4.4
+            exit_price = None
+            exit_reason = None
+
+            if trade.direction == "CALL":
+                 if message['low'] <= trade.sl_price:
+                      exit_price = trade.sl_price
+                      exit_reason = ExitReason.SL
+                 elif message['high'] >= trade.target_price:
+                      exit_price = trade.target_price
+                      exit_reason = ExitReason.TGT
+            else: # PUT
+                 if message['high'] >= trade.sl_price:
+                      exit_price = trade.sl_price
+                      exit_reason = ExitReason.SL
+                 elif message['low'] <= trade.target_price:
+                      exit_price = trade.target_price
+                      exit_reason = ExitReason.TGT
+
+            if exit_price:
+                pts = (exit_price - trade.entry_price) if trade.direction == "CALL" else (trade.entry_price - exit_price)
+                pnl_rupees = pts * multiplier
+                exit_v = ExitEvent(
+                    trade_id=trade.trade_id, exit_time=ts, exit_price=exit_price,
+                    exit_reason=exit_reason,
+                    pnl_points=pts, pnl_rupees=pnl_rupees, bars_held=trade.duration_bars, mfe=trade.mfe, mae=trade.mae
+                )
+                self.lifecycle.close_trade(trade.trade_id, exit_v)
+                
+                if pts < 0: self.engine.daily_losses += 1
+                else: self.engine.daily_losses = 0
+                return
+
+            # 5. ADAPTIVE EXIT (Transition Monitor: Regime Decay / Trap)
             monitor = self.engine.process_in_trade_tick(df_5m, df_15m, trade, pre_computed_result=analysis, current_price=message['close'])
             if monitor.get('in_trade_action') == "EXIT":
                 pts = (message['close'] - trade.entry_price) if trade.direction == "CALL" else (trade.entry_price - message['close'])
@@ -447,17 +477,7 @@ class BacktestMode(BaseMode):
                      exit_price = trade.target_price
                      exit_reason = ExitReason.TGT
 
-            if exit_price:
-                pts = (exit_price - trade.entry_price) if trade.direction == "CALL" else (trade.entry_price - exit_price)
-                pnl_rupees = pts * multiplier
-                event = ExitEvent(trade.trade_id, ts, exit_price, exit_reason, pts, pnl_rupees)
-                self.lifecycle.close_trade(trade.trade_id, event)
 
-                # v4.4 Churn Brake Tracking
-                if pts < 0:
-                    self.engine.daily_losses += 1
-                else:
-                    self.engine.daily_losses = 0
         
         else:
             # 4. ENTRY LOGIC
@@ -466,14 +486,8 @@ class BacktestMode(BaseMode):
                 if trade_ledger.has_open_position(self.symbol):
                     return
 
-                # Prepare standard context for Propose
-                ctx = {
-                    'symbol': self.symbol,
-                    'close': message['close'],
-                    'regime_id': regime_id,
-                    'is_fallback': decision.get('is_fallback', False),
-                    'atr': 0.0, # Placeholder
-                }
+                # Unified Context Extraction (v4.6)
+                ctx = self.engine.get_trade_context(analysis, self.symbol, message['close'], mode="BACKTEST")
                 
                 # Propose + Open sequence (State Machine)
                 trade = self.lifecycle.propose_trade(decision, ctx, ts)
@@ -490,13 +504,8 @@ class BacktestMode(BaseMode):
                     ghost_decision = decision.copy()
                     ghost_decision['action'] = ghost_action
                     
-                    ctx = {
-                        'symbol': self.symbol,
-                        'close': message['close'],
-                        'regime_id': regime_id,
-                        'is_fallback': decision.get('is_fallback', False),
-                        'atr': 0.0
-                    }
+                    # Unified Context Extraction (v4.6)
+                    ctx = self.engine.get_trade_context(analysis, self.symbol, message['close'], mode="BACKTEST")
                     
                     # Propose as Counterfactual
                     trade = self.lifecycle.propose_trade(ghost_decision, ctx, ts)

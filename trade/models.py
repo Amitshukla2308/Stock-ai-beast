@@ -101,7 +101,19 @@ class Trade:
     
     # Meta
     config_hash: str = ""
-    system_version: str = "v2.8"
+    system_version: str = "v6.2-SOVEREIGN"
+
+    def to_dict(self):
+        """Serialization helper for Telegram/Logs"""
+        d = {}
+        for k, v in self.__dict__.items():
+            if isinstance(v, Enum):
+                d[k] = v.value
+            elif isinstance(v, datetime):
+                d[k] = v.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                d[k] = v
+        return d
 
 
 @dataclass

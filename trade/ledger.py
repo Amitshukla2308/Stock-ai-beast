@@ -74,6 +74,7 @@ class TradeLedger:
         
         # Use trade_id as key for everything in v2.9 to avoid collision and support concurrency logic
         key = trade.trade_id
+        trade.status = TradeStatus.OPEN # v6.3 Fix: Ensure status is updated before persisting
         self.open_positions[key] = trade
         
         # Initialize MFE/MAE tracking

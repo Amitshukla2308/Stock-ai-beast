@@ -6,12 +6,20 @@ If you deliberately change the architecture, you MUST update this file immediate
 Do not rely on "Implied" logic. Trace the code manually before editing this.
 -->
 
+
 # 🧠 GEMINI Knowledge Base: The Only Truth Architecture
+
+> [!IMPORTANT]
+> **TO ALL AI AGENTS:** This file is your PRIMARY COMPASS.
+> 1. **Read this first** before touching any code.
+> 2. **Trust this file** over any code comments or "implied" logic.
+> 3. **Update this file** if you structurally change the system.
+> 4. **Do not hallucinate** features not listed here.
 
 This document serves as the **Long-Term Memory** for developers (AI and Human) working on the Beast. It captures the non-negotiable architectural laws that govern the system to ensure research validity and execution determinism.
 
-## ⚡ The Verified Command Execution Trace (v5.3-FINAL)
-*Traced manually on Jan 27, 2026 for command:* `docker exec beast_engine_gpu python -m engine.gateway backtest --gpu ...`
+## ⚡ The Verified Command Execution Trace (v6.3-SOVEREIGN)
+*Traced manually on Feb 02, 2026 for command:* `docker exec beast_engine python -m engine.gateway live ...`
 
 1.  **Entry Point**: `engine/gateway.py` -> `get_engine('backtest')`
     *   Validation: Checks `start_date`, `end_date`, `symbol`.
@@ -52,7 +60,7 @@ This document serves as the **Long-Term Memory** for developers (AI and Human) w
 | :--- | :--- | :--- | :--- |
 | **`trading.db`** | **The Spine** | `data/` | **GOLD SOURCE.** Contains NIFTY 5m candles (2021-2026). |
 | **`knowledge_nuggets`** | **The Mind** | `data/` | Semantic memory of past regime outcomes (RAG). |
-| **`market_states.parquet`** | **The Features (X)** | `atlas/data/` | Normalized state vectors for machine learning. |
+| **`sovereign_states_64d.parquet`** | **The Features (X)** | `atlas/data/` | **SOVEREIGN TRUTH (64D).** Generated from `calculators.py` (2021-2025). |
 | **`trading_audit.db`** | **The Judge** | `data/` | Simulation logs and counterfactual records. |
 
 ### North Star Invariants
@@ -63,6 +71,7 @@ If any of these are violated, the system is invalid:
 4.  **Zero-trade day must explain exactly why** (Traceability).
 5.  **Modes are Adapters**: `backtest.py` and `live.py` only feed candles; they never calculate indicators.
 6.  **Temporal Integrity**: RAG lookups must STRICTLY use `WHERE created_at < current_sim_time`.
+7.  **Sovereignty**: `confluence_map.json` MUST be rebuilt using `sovereign_states_64d.parquet` (64D) via `rebuild_confluence_map.py`.
 
 ---
 
@@ -71,19 +80,25 @@ If any of these are violated, the system is invalid:
 ### 1. Market Physics (Enrichment)
 **Where**: `engine/features/calculators.py`
 **Role**: "What is reality?" (Facts only, Numbers only, No Decisions)
-*   **Calculators**: `TER` (Trend Efficiency), `SQZ` (Squeeze), `VIX_COEFF`.
-*   **Output**: 64-Dimensional Vector.
+*   **Dimensions**: 64-Dimensional "Market Biology" Vector (Physics, Hurst, Entropy, Volatility, Conviction).
+*   **Source**: `PhysicsEngine` + `AtlasFeatures`.
 
 ### 2. Regime Engine (The Map)
 **Where**: `atlas/regime.py`
 **Role**: "Where are we?" (Context Classification)
-*   **Mechanism**: Uses Pre-trained KMeans to classify the market into a Cluster Pair (e.g., `Child=29`, `Parent=6`).
-*   **Weights**: `atlas/models/kmeans_5m.joblib` and `kmeans_15m.joblib`.
-*   **Optimization**: Accelerates via `cuML` on GPU for sub-millisecond inference.
+*   **Purification**: **64D $\to$ 47D** (Correlation Pruning). Removes redundant signals (e.g. echoes of volatility).
+*   **Compression**: **47D $\to$ 36D** (PCA). Retains >98% variance.
+*   **Architecture**: **Dual-Scale Hierarchical Clustering** (The "Dream Architecture").
+*   **The Grid**:
+    *   **15m Structural Boss**: Maps to one of 64 structural clusters.
+    *   **5m Execution Worker**: Maps to one of 64 tactical clusters.
+    *   **Confluence**: Creates a $64 \times 64$ grid of 4,096 possible market states.
+*   **Weights**: `atlas/models/kmeans_5m.joblib` and `kmeans_15m.joblib` (K=64).
 
 ### 3. Registry Layer (The Memory)
 **Where**: `atlas/registry.py`
 **Role**: "What happened last time?" (Probabilistic Lookup)
+*   **Gold Regimes**: Identifies high-probability confluences (e.g., 9:39 Long, 53:10 Short).
 *   **RAG**: Queries `knowledge_nuggets` for similar past contexts.
 *   **Confluence**: Checks if Child and Parent regimes agree on direction.
 
@@ -91,7 +106,7 @@ If any of these are violated, the system is invalid:
 **Where**: `engine/research_engine.py` (Orchestrator)
 **Role**: "Should we act?" (Signal Generation)
 *   **Signal**: `BUY_CALL` / `BUY_PUT` / `HOLD`.
-*   **Constraint**: Must pass `Regime.win_rate > Threshold`.
+*   **Transition Engine**: Monitors 5m Cluster ID in real-time. If state transitions to a neutral/negative cluster, trade is invalidated (Regime-Stop).
 
 ### 5. Risk Guard (The Sheriff)
 **Where**: `engine/risk_guard.py`
@@ -152,20 +167,43 @@ graph TD
     - **v5.3**: Doubled size for 'Golden Regimes' (e.g., 32:8) via Alpha Amplification.
 *   **Result**: +₹156k PnL (+245% vs Baseline), PF 1.62.
 
+### 6. Sovereign Compliance (v6.2 Live Parity)
+*   **Issue**: `LiveMode` was missing the "Regime Trap" (In-Trade Monitor) and used legacy interfaces, creating a "Reality Gap" vs Backtest.
+*   **Solution**:
+    - **Interface Unity**: `LiveMode` now constructs `df_5m`/`df_15m` via `_prepare_dataframes` exactly as `BacktestMode` does.
+    - **Closed Loop**: `LiveMode` now runs `ResearchEngine.process_in_trade_tick()` every cycle.
+*   **Verification**: `tests/verify_live_backtest_parity.py` confirmed bit-for-bit identical decisions (Regime/Action) on historical data snapshots.
+
+### 7. Mock Mode Fidelity (v6.3 Updates)
+*   **Issue**: Mock mode used stale data and synthetic options pricing, leading to unrealistic PnL.
+*   **Solution**:
+    - **Real Options**: Switched to `market_data_cache` for option quotes.
+    - **State Sync**: Implemented `Broker <-> Ledger` handshake on startup to catch restore drifts.
+    - **EOD Grace**: Added forced exit at 15:30 and Entry Guard at 15:15.
+*   **Result**: Mock PnL matches live execution logic with tick-level pricing accuracy.
+
+### 8. Project Vajra (v6.0 Reporting Standard)
+*   **Objective**: Remove "Analyst Subjectivity" from Backtest Reports.
+*   **Implementation**: `trade/reporter.py` rewritten.
+    - **Deterministic Verdict**: Uses `Stability Score` (SQN Proxy) to classify system as ROBUST/FRAGILE.
+    - **Forensics**: Tracks "Regime Transition" reliability and "Friction Drag".
+    - **Account Summary**: Tracks Capital Growth and Drawdown peaks.
+
+
 ---
 
 ## 🛠️ Maintenance Protocols
 
 ### 1. Adding a New Feature
 1.  **Modify** `engine/features/calculators.py`.
-2.  **Verify** `atlas/model_builder/feature_engine.py` can normalize it.
-3.  **Retrain** KMeans models.
+2.  **Regenerate** Ground Truth: `python scripts/generate_64d_states.py`.
+3.  **Rebuild** Map: `python scripts/rebuild_confluence_map.py`.
 
 ### 2. Debugging a "Missing Trade"
 Follow the Trace Chain in logs:
 1.  **Warmup**: Is the system past 200 bars? (`[ATLAS] ⏳ Warmup: ...`)
 2.  **Regime**: What is the current ID? (e.g., `Regime: 22:15`)
-3.  **Probability**: Is `WR > 0.6`? (Check `atlas_v3_cluster_stats.json`)
+3.  **Probability**: Is `WR > 0.45`? (Check `atlas/models/confluence_map.json`)
 4.  **Risk**: Did `RiskGuard` block it? (e.g., "R:R < 1.0" or "Max Drawdown Reached")
 
 ---

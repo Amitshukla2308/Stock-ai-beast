@@ -57,6 +57,8 @@ class TradeLifecycle:
             reason=decision.get('reason', ''),
             status=TradeStatus.PROPOSED,
             metadata=decision.get('metadata', {}),
+            config_hash=context.get('config_hash', ''),
+            system_version=context.get('system_version', 'v2.8'),
             physics_ctx={
                 "velocity": context.get('velocity', 0.0),
                 "entropy": context.get('entropy_price', 0.0),
@@ -210,6 +212,79 @@ MFE={trade.mfe:+.1f}
 
         return trade
     
+    def restore_open_trades(self):
+        """
+        v6.2.4: Restore open trades from Database on startup.
+        """
+        import pandas as pd
+        from trade.models import TradeStatus
+        try:
+            # Connect to DB (dynamic based on mode)
+            from data.database import get_connection
+            import os
+            
+            db_name = os.environ.get("BEAST_DB_NAME", "trading.db")
+            conn = get_connection(db_name)
+            # Check if trades table exists
+            try:
+                query = "SELECT * FROM trades WHERE status='OPEN'"
+                df = pd.read_sql(query, conn)
+            except:
+                logger.warning("[LIFECYCLE] ⚠️ Could not query trades table. Skipping restore.")
+                conn.close()
+                return
+
+            conn.close()
+            
+            if df.empty:
+                logger.info("[LIFECYCLE] 🔄 No open trades found in DB to restore.")
+                return
+
+            restored_count = 0
+            for _, row in df.iterrows():
+                try:
+                    # Parse timestamp (Assume stored as string)
+                    entry_time = pd.to_datetime(row['entry_time'])
+                    if entry_time.tz is None: 
+                        import pytz
+                        IST = pytz.timezone('Asia/Kolkata')
+                        entry_time = IST.localize(entry_time) 
+                    
+                    # Create Trade
+                    trade = Trade(
+                        trade_id=row['trade_id'],
+                        session_id=row['session_id'],
+                        symbol=row['symbol'],
+                        style=row['style'],
+                        direction=row['direction'],
+                        entry_time=entry_time,
+                        entry_price=row['entry_price'],
+                        sl_price=row.get('sl_price', 0.0), 
+                        target_price=row.get('target_price', 0.0),
+                        quantity=row['quantity'],
+                        confidence=row.get('confidence', 0.0),
+                        regime=row.get('regime', 'UNKNOWN'),
+                        status=TradeStatus.OPEN,
+                        reason="Restored from DB",
+                        metadata={
+                            "option_symbol": row.get('option_symbol'),
+                            "strike": row.get('strike')
+                        } 
+                    )
+                    
+                    # Inject into Ledger
+                    if trade_ledger.open_trade(trade):
+                        restored_count += 1
+                        logger.info(f"[LIFECYCLE] ♻️ Restored Trade {trade.trade_id} from DB.")
+                except Exception as e:
+                    logger.error(f"[LIFECYCLE] ❌ Failed to reconstruct trade {row.get('trade_id')}: {e}")
+            
+            if restored_count > 0:
+                logger.info(f"[LIFECYCLE] ✅ Restoration Complete. {restored_count} trades active.")
+            
+        except Exception as e:
+            logger.error(f"[LIFECYCLE] ❌ Restore Logic Failed: {e}")
+
     def force_close_all(self, current_price: float, timestamp: datetime, reason: ExitReason = ExitReason.EOD) -> int:
         """
         Force close all open positions (e.g., at EOD).
@@ -235,7 +310,7 @@ MFE={trade.mfe:+.1f}
                 exit_reason=reason,
                 pnl_points=pnl_points,
                 pnl_rupees=pnl_rupees,
-                bars_held=0  # Would need bar counter
+                bars_held=getattr(trade, 'duration_bars', 0)
             )
             
             if self.close_trade(trade.trade_id, exit_event):

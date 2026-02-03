@@ -37,7 +37,7 @@ class DataAdapter:
             ORDER BY timestamp ASC
         """
         try:
-            conn = get_connection()
+            conn = get_connection("trading.db")
             # print(f"   [DB] Querying: {query}")
             df = pd.read_sql_query(query, conn)
             
@@ -95,7 +95,7 @@ class DataAdapter:
                 ORDER BY timestamp DESC LIMIT 1
             """
             try:
-                conn = get_connection()
+                conn = get_connection("trading.db")
                 result = conn.execute(query).fetchone()
                 conn.close()
                 if result:

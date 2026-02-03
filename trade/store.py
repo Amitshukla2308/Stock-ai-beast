@@ -76,7 +76,9 @@ class TradeStore:
                 ("shadow_exit_reason", "TEXT"),
                 ("shadow_pnl", "REAL"),
                 ("physics_ctx", "TEXT"), # Spec-002 Research State
-                ("edge_death_bar", "INTEGER") # v2.9.1 Precise Timeline
+                ("edge_death_bar", "INTEGER"), # v2.9.1 Precise Timeline
+                ("option_symbol", "TEXT"), # v6.3 Mock Fidelity
+                ("strike", "INTEGER")      # v6.3 Mock Fidelity
             ]
             
             for col, dtype in migrations:
@@ -103,8 +105,9 @@ class TradeStore:
                     confidence, regime, session_phase, trend_efficiency,
                     atr, or_range, location, reason, status,
                     config_hash, system_version, pnl_edge_death, etd,
-                    is_counterfactual, block_reason, physics_ctx, edge_death_bar
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_counterfactual, block_reason, physics_ctx, edge_death_bar,
+                    option_symbol, strike
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 trade.trade_id,
                 trade.session_id,
@@ -132,7 +135,9 @@ class TradeStore:
                 1 if trade.is_counterfactual else 0,
                 trade.block_reason,
                 json.dumps(trade.physics_ctx) if trade.physics_ctx else "{}",
-                trade.edge_death_bar
+                trade.edge_death_bar,
+                trade.metadata.get('option_symbol'),
+                trade.metadata.get('strike')
             ))
             conn.commit()
             logger.debug(f"[STORE] Inserted trade {trade.trade_id}")

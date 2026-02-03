@@ -157,5 +157,20 @@ class TradingConfig:
         return value
 
 
+    def save(self, config_path: str = "config/trading_config.json"):
+        """Save current config state to disk"""
+        try:
+            if not os.path.isabs(config_path):
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                config_path = os.path.join(project_root, config_path)
+            
+            with open(config_path, 'w') as f:
+                json.dump(self._config, f, indent=4)
+            
+            logger.info(f"💾 Config successfully saved to {config_path}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save config: {e}")
+            raise
+
 # Global singleton instance
 config = TradingConfig()

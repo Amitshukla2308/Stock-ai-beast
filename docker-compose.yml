@@ -1,0 +1,60 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: beast_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    networks:
+      - beast_net
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  beast-engine:
+    build: .
+    container_name: beast_engine
+    command: tail -f /dev/null
+    environment:
+      - REDIS_HOST=beast_redis
+      - REDIS_PORT=6379
+      - FYERS_CLIENT_ID=${FYERS_CLIENT_ID}
+      - FYERS_SECRET_ID=${FYERS_SECRET_ID}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - TELEGRAM_WEBHOOK_URL=${TELEGRAM_WEBHOOK_URL}
+      - TRADING_MODE=PAPER
+      - TORCH_CUDA_ARCH_LIST=12.0
+      - LIBRARY_PATH=/usr/local/cuda/lib64/stubs
+    volumes:
+      - ${PWD}:/app
+      - ${PWD}/data:/app/data # Keep specific data mount if needed, but root mount covers it
+      - ${PWD}/logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - beast_net
+
+  beast-producer:
+    build: .
+    container_name: beast_producer
+    command: tail -f /dev/null
+    environment:
+      - REDIS_HOST=beast_redis
+      - REDIS_PORT=6379
+    volumes:
+      - ${PWD}/data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - beast_net
+
+networks:
+  beast_net:
+    driver: bridge

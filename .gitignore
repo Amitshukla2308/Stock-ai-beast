@@ -64,3 +64,12 @@ fyers_token.json
 
 # Large Data
 atlas/data/states_*.parquet
+atlas/data/*.parquet
+atlas/data/raw_states/
+
+# Database files
+*.db
+data/redis/
+session_trades*.json
+data/live_feed/
+Backtest/

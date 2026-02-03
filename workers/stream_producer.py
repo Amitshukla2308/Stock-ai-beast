@@ -9,25 +9,56 @@ from fyers_apiv3.FyersWebsocket import data_ws
 from engine.auth_fyers import validate_token_file as load_token
 from data.database import get_connection, get_fyers_symbol
 
-load_dotenv()
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_HOST", 6379)) # Typo in original code, fixing here implicitly? No, preserve port var name.
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 STREAM_KEY = "market_feed"
 import pytz
+from dateutil import parser as date_parser
 IST = pytz.timezone('Asia/Kolkata')
+
+def get_redis_client():
+    """Robust Redis Discovery: Try Docker DNS (Service/Container), IP, then Localhost."""
+    potential_hosts = [
+        os.getenv("REDIS_HOST", "beast_redis"), # Configured Env
+        "beast_redis",                          # Container Name
+        "redis",                                # Docker Service Name
+        "172.19.0.3",                          # Hardcoded Container IP (Fallback)
+        "localhost"                             # Host
+    ]
+    
+    # Deduplicate preserving order
+    hosts = list(dict.fromkeys([h for h in potential_hosts if h]))
+
+    for host in hosts:
+        try:
+            # print(f"   🔎 [Redis] Trying {host}...")
+            r = redis.Redis(host=host, port=REDIS_PORT, decode_responses=False, socket_connect_timeout=1)
+            r.ping()
+            print(f"   ✅ [Redis] Connected to {host}")
+            return r
+        except Exception as e:
+            # print(f"   ⚠️ [Redis] {host} failed: {e}")
+            continue
+
+    print("   ❌ [Redis] All connection attempts failed.")
+    raise ConnectionError("Could not connect to Redis on any known host.")
 
 class StreamProducer:
     def __init__(self, mode="LIVE", days=1, symbol="NIFTY"):
         self.mode = mode
         self.days = days
         self.symbol = symbol
-        self.r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+        self.r = get_redis_client()
         self.running = True
 
     def start(self):
         print(f"🚀 Starting Stream Producer Mode: {self.mode} (Days: {self.days})")
-        if self.mode == "MOCK":
+        
+        # v6.3: "MOCK" defaults to Adversarial Replay (Data Simulation)
+        # This ensures testing is possible 24/7 (even when markets are closed).
+        # For 'Paper Trading' (Live Data), we will need a separate flag/mode later.
+        if self.mode == "MOCK": 
             self._run_mock_adversarial()
         else:
             self._run_fyers_socket()
@@ -47,6 +78,7 @@ class StreamProducer:
         symbol = get_fyers_symbol(self.symbol)
 
         def on_message(message):
+            # print(f"DEBUG MSG: {message}")
             if 'symbol' in message and message['symbol'] == symbol:
                 self._publish({
                     'timestamp': str(datetime.now(IST)),
@@ -57,14 +89,30 @@ class StreamProducer:
                     'low': str(message.get('low_price'))
                 })
 
+        def on_connect():
+            print(f"✅ [FyersSocket] Connected to Data Feed! Subscribing to {symbol}...")
+            fyers.subscribe(symbols=[symbol], data_type="SymbolUpdate")
+
+        def on_error(message):
+            print(f"❌ [FyersSocket] Error: {message}")
+
+        def on_close(message):
+            print(f"⚠️ [FyersSocket] Connection Closed: {message}")
+
+        # v6.3: Enhanced Socket Config
         fyers = data_ws.FyersDataSocket(
             access_token=access_token,
-            log_path="logs",
+            log_path="logs_v2",
             litemode=True,
             write_to_file=False,
             reconnect=True,
-            on_message=on_message
+            on_connect=on_connect,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close
         )
+        
+        print(f"🔌 [FyersSocket] Intializing Connection for {symbol}...")
         fyers.connect()
 
     def _run_mock_adversarial(self):
@@ -89,24 +137,31 @@ class StreamProducer:
         ist = pytz.timezone('Asia/Kolkata')
         utc = pytz.timezone('UTC')
 
-        conn = get_connection()
+        conn = get_connection("trading.db")
         
-        # 1. Get the last available timestamp in DB
-        last_ts = conn.execute("SELECT MAX(timestamp) FROM candles_5min").fetchone()[0]
-        if not last_ts:
+        # 1. Get the last available timestamp in DB (Check 1min first for fidelity)
+        table_name = "candles_1min"
+        raw_ts = conn.execute(f"SELECT MAX(timestamp) FROM {table_name}").fetchone()[0]
+        
+        if not raw_ts:
+             # Fallback to 5min
+             table_name = "candles_5min"
+             raw_ts = conn.execute(f"SELECT MAX(timestamp) FROM {table_name}").fetchone()[0]
+        
+        if not raw_ts:
             print("   ❌ No data in database!")
             return
 
+        last_ts = date_parser.parse(raw_ts)
+
         # 2. Calculate Start timestamp (Last TS - N Days)
-        # We want full days, so let's normalize to midnight? 
-        # Or just subtract 24h * Days. simple subtraction is robust enough for mock.
         start_ts = last_ts - timedelta(days=self.days)
         
-        print(f"   📅 Replay Range: {start_ts} -> {last_ts} ({self.days} Days)")
+        print(f"   📅 Replay Range: {start_ts} -> {last_ts} ({self.days} Days) | Src: {table_name}")
         
         # 3. Fetch Candles in Range (Forward Chronological)
         full_symbol = get_fyers_symbol(self.symbol)
-        query = "SELECT timestamp, open, high, low, close FROM candles_5min WHERE symbol = ? AND timestamp > ? ORDER BY timestamp ASC"
+        query = f"SELECT timestamp, open, high, low, close FROM {table_name} WHERE symbol = ? AND timestamp > ? ORDER BY timestamp ASC"
         rows = conn.execute(query, (full_symbol, start_ts)).fetchall()
         conn.close()
         
@@ -119,10 +174,15 @@ class StreamProducer:
         symbol = full_symbol
         
         # Iterate Forward
-        for ts, o, h, l, c in rows:
+        for r_ts, o, h, l, c in rows:
             if not self.running: break
             
             # Convert timestamp to IST if naive or UTC
+            if isinstance(r_ts, str):
+                ts = date_parser.parse(r_ts)
+            else:
+                ts = r_ts
+
             if ts.tzinfo is None:
                 ts = utc.localize(ts)
             

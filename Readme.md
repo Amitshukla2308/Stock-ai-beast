@@ -18,22 +18,23 @@ The system operates in a strictly hierarchical pipeline. Data flows DOWN, decisi
 ```mermaid
 graph TD
     Data[Data Layer\n(Trading.db / Fyers)] --> Physics[Physics Engine\n(Calculators.py)]
-    Physics --> Enrichment[Enrichment Layer\n(Normalization)]
-    Enrichment --> Regime[Regime Engine\n(Cluster Identification)]
+    Physics --> Purification[Purification Layer\n(64D -> 47D -> 36D PCA)]
+    Purification --> Regime[Regime Engine\n(Cluster Identification)]
     Regime --> Registry[Registry Layer\n(RAG / History Lookup)]
     Registry --> Strategy[Strategy Logic\n(Confluence / Signal)]
-    Strategy --> Risk[Risk Guard\n(Policy / Sizing)]
+    Strategy --> Risk[Risk Guard\n(Sovereign Laws)]
     Risk --> Execution[Trade Lifecycle\n(Executor)]
 ```
 
-### 1. Physics Engine ( The Authority)
+### 1. Physics Engine (The Authority)
 *   **Role**: Defines "Reality".
 *   Calculates the **64-Dimensional Market State Vector** (Volatility, Entropy, VRP, Structure).
+*   **Purification**: Applies **Correlation Pruning** (47D) and **PCA** (36D) to remove noise and extract the "Latent Manifold".
 *   **Authority**: If Physics says the trend is weak (Low TER), no trade can occur, regardless of what the strategy "thinks".
 
 ### 2. Regime Engine (The Map)
 *   **Role**: Contextual Awareness.
-*   Classifies the market into specific **Cluster Pairs** (e.g., `Parent=6` / `Child=29`) using pre-trained KMeans models.
+*   Classifies the compressed market state into specific **Cluster Pairs** (e.g., `Parent=6` / `Child=29`) using pre-trained KMeans models (K=64).
 *   **Philosophy**: We trade the **Shift**, not the static price.
 
 ### 3. Registry Layer (The Memory)
@@ -68,13 +69,17 @@ graph TD
 ```text
 stock-ai-beast/
 ├── atlas/            # The Dimensional Mind
-│   ├── regime.py         # KMeans Cluster Prediction
+│   ├── regime.py         # KMeans Cluster Prediction (Pipeline Runtime)
 │   ├── registry.py       # RAG Memory Lookup
-│   └── models/           # Pre-trained .joblib models
+│   ├── models/           # Pre-trained .joblib models + confluence_map.json
+│   └── data/             # Sovereign Ground Truth (sovereign_states_64d.parquet)
 ├── engine/           # The Orchestrator
-│   ├── features/         # Physics Calculators
+│   ├── features/         # Physics Calculators (AtlasFeatures + PhysicsEngine)
 │   ├── research_engine.py# Main Brain Loop
 │   └── risk_guard.py     # Safety Policeman
+├── scripts/          # Maintenance Protocols
+│   ├── generate_64d_states.py   # Regenerate Ground Truth
+│   └── rebuild_confluence_map.py# Rebuild Brain
 ├── data/             # The Gold Source
 │   ├── database.py       # DuckDB Interface
 │   └── trading.db        # The Truth (Candles + Trades)

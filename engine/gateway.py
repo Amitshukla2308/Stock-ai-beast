@@ -13,9 +13,16 @@ log_dir = os.path.join(os.getcwd(), "logs_v2")
 os.makedirs(log_dir, exist_ok=True)
 
 # File Handler (Detailed)
-file_handler = logging.FileHandler(f"{log_dir}/beast_engine.log", mode='a')
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+# File Handler (Detailed)
+file_handler = None
+try:
+    file_handler = logging.FileHandler("logs_v2/beast_engine.log", mode='a')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+except PermissionError:
+    print("⚠️ Warning: Could not write to log file (Permission Denied). Switched to Console Only.")
+except Exception as e:
+    print(f"⚠️ Warning: Log file init failed: {e}")
 
 # Console Handler (Clean UI)
 console_handler = logging.StreamHandler(sys.stdout)
@@ -23,9 +30,13 @@ console_handler.setLevel(logging.INFO)
 # Use a simpler format for console if desired, or keep standard
 console_handler.setFormatter(logging.Formatter('%(message)s')) # Cleaner message-only for console
 
+handlers = [console_handler]
+if file_handler:
+    handlers.append(file_handler)
+
 logging.basicConfig(
     level=logging.DEBUG, # Capture all at root level
-    handlers=[file_handler, console_handler]
+    handlers=handlers
 )
 # Silence noisy libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -53,6 +64,7 @@ def get_engine(mode, args=None):
     Factory to create the appropriate engine instance.
     """
     if mode == 'backtest':
+        os.environ["BEAST_DB_NAME"] = "simulation.db"
         from engine.modes.backtest import BacktestMode as EngineClass
             
         symbol = args.symbol if args else "NIFTY"
@@ -114,12 +126,15 @@ def get_engine(mode, args=None):
         )
         
     elif mode == 'mock':
+        os.environ["BEAST_DB_NAME"] = "trading.db" # Mock uses Gold Source (Live Data)
         from engine.modes.live import LiveMode
         debug = args.debug_schedule if args else False
         symbol = args.symbol if args else "NIFTY"
-        return LiveMode(debug_schedule=debug, symbol=symbol, chat_id=args.chat_id, mock=True)
+        replay = args.replay if hasattr(args, 'replay') else False
+        return LiveMode(debug_schedule=debug, symbol=symbol, chat_id=args.chat_id, mock=True, replay=replay)
         
     elif mode == 'live':
+        os.environ["BEAST_DB_NAME"] = "trading.db"
         from engine.modes.live import LiveMode
         debug = args.debug_schedule if args else False
         symbol = args.symbol if args else "NIFTY"
@@ -140,6 +155,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug-schedule", action="store_true", help="Fast schedule for debugging")
     parser.add_argument("--validate-auth", action="store_true", help="Only validate auth and exit")
     parser.add_argument("--gpu", action="store_true", help="Enable VRAM (GPU) Acceleration via RAPIDS")
+    parser.add_argument("--replay", action="store_true", help="Run in Historical Replay Mode (Adversarial) for mock mode")
     
     args = parser.parse_args()
 
